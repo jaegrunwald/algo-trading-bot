@@ -1,0 +1,11 @@
+services:
+  rating-engine:
+    build: .
+    ports:
+      # Host 5001 avoids macOS AirPlay using 5000; container still listens on 5000.
+      - "${HOST_PORT:-5001}:5000"
+    environment:
+      - FLASK_DEBUG=${FLASK_DEBUG:-0}
+      - WATCHLIST_TICKERS=${WATCHLIST_TICKERS:-AAPL,MSFT,GOOGL}
+    volumes:
+      - ./rating_engine:/app/rating_engine
