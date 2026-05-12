@@ -10,6 +10,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY rating_engine/ ./rating_engine/
+COPY scripts/ ./scripts/
+COPY models/ ./models/
 COPY wsgi.py .
 
 ENV FLASK_APP=wsgi:app

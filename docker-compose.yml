@@ -7,5 +7,7 @@ services:
     environment:
       - FLASK_DEBUG=${FLASK_DEBUG:-0}
       - WATCHLIST_TICKERS=${WATCHLIST_TICKERS:-AAPL,MSFT,GOOGL}
+      - RATING_MODEL_PATH=${RATING_MODEL_PATH:-models/rating_model.joblib}
     volumes:
       - ./rating_engine:/app/rating_engine
+      - ./models:/app/models

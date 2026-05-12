@@ -11,6 +11,8 @@ from markupsafe import escape
 
 from rating_engine.config import get_watchlist_tickers
 from rating_engine.market_data import dataframe_to_records, fetch_daily_history
+from rating_engine.ai_rating import load_artifact, model_info
+from rating_engine.rating import rating_for_ticker as ml_rating_for_ticker
 
 load_dotenv()
 
@@ -73,9 +75,12 @@ def create_app() -> Flask:
         return jsonify(
             {
                 "service": "rating-engine",
-                "phase": 1,
+                "rating": "ML (sklearn); train with scripts/train_rating_model.py",
                 "endpoints": {
                     "health": "/health",
+                    "model": "/api/model",
+                    "rating": "/api/rating/<ticker>?period=1y&details=0",
+                    "ratings_watchlist": "/api/ratings?period=1y&details=0",
                     "history_json": "/api/history/<ticker>?period=1y&format=json",
                     "history_html": "/api/history/<ticker>?period=3mo&format=html",
                     "watchlist_json": "/api/history?period=1y&format=json",
@@ -87,6 +92,61 @@ def create_app() -> Flask:
     @app.get("/health")
     def health():
         return jsonify({"status": "ok", "service": "rating-engine"})
+
+    @app.get("/api/model")
+    def model_meta():
+        """Trained artifact metadata (path, trained_at, evaluation, label definition)."""
+        try:
+            return jsonify(model_info())
+        except FileNotFoundError as e:
+            return jsonify({"error": str(e)}), 503
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 503
+
+    @app.get("/api/ratings")
+    def ratings_watchlist():
+        """ML rating for each symbol in WATCHLIST_TICKERS."""
+        period = request.args.get("period", "1y")
+        details = request.args.get("details", "0") == "1"
+        tickers = get_watchlist_tickers()
+        data: list[dict] = []
+        errors: list[dict] = []
+        try:
+            load_artifact()
+            for sym in tickers:
+                try:
+                    data.append(
+                        ml_rating_for_ticker(sym, period=period, include_details=details)
+                    )
+                except ValueError as e:
+                    errors.append({"ticker": sym, "error": str(e)})
+        except FileNotFoundError as e:
+            return jsonify({"error": str(e)}), 503
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 503
+        return jsonify(
+            {
+                "watchlist": tickers,
+                "period": period,
+                "summary": {"ok": len(data), "errors": len(errors)},
+                "data": data,
+                "errors": errors,
+            }
+        )
+
+    @app.get("/api/rating/<ticker>")
+    def rating_one(ticker: str):
+        """ML rating: requires trained model at RATING_MODEL_PATH."""
+        period = request.args.get("period", "1y")
+        details = request.args.get("details", "0") == "1"
+        try:
+            return jsonify(
+                ml_rating_for_ticker(ticker, period=period, include_details=details)
+            )
+        except FileNotFoundError as e:
+            return jsonify({"error": str(e)}), 503
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
     @app.get("/api/history/<ticker>")
     def history_one(ticker: str):

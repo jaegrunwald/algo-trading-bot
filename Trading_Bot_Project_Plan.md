@@ -1,46 +1,49 @@
-# Algorithmic Paper Trading Platform: Project Specification
+# Quantitative Portfolio Management & Algorithmic Trading System
 
 ## 1. Project Overview
-A fully automated, microservice-based paper trading platform that tracks equity trends, calculates a weighted Buy/Hold/Sell rating, and executes trades autonomously against a simulated $100,000 portfolio using the Alpaca API.
+A fully automated, machine learning-driven portfolio management system designed to actively trade a simulated $100,000 Alpaca brokerage account [cite: 1]. The objective is to consistently outperform the S&P 500 (SPY) benchmark [cite: 1]. The system utilizes a dynamic pre-market scanner to find high-liquidity stocks in play, applies a precision-tuned classification model to detect volatility squeezes and momentum, and executes trades autonomously with strict position sizing and automated risk management [cite: 1].
 
 ## 2. System Architecture & Tech Stack
-To ensure clean separation of concerns and robust performance, the system is structured around independent microservices. 
+The platform relies on independent, specialized services to ensure clean separation between daily scanning, offline model training, and active execution [cite: 1].
 
-* **The Rating Engine (Data Science Focus):** Python, Flask, Pandas, NumPy. Responsible for ingesting market data, calculating indicators (Moving Averages, RSI), and outputting a definitive rating.
-* **The Execution Service (Platform Engineering Focus):** Python, Alpaca Trade API. A scheduled worker process that queries the Rating Engine and submits orders to the Alpaca brokerage.
-* **The Dashboard (User Interface):** Node.js, Express. Provides a real-time view of the Alpaca portfolio, active holdings, and daily profit/loss.
+* **The Dynamic Scanner:** Python, `finvizfinance`. Scrapes the market to generate a daily watchlist of mid/large-cap equities experiencing unusual momentum, ensuring the ML model only evaluates highly liquid, "in-play" assets [cite: 1].
+* **The Rating Engine (Data Science / ML):** Python, Pandas, `scikit-learn`. Ingests OHLCV data, calculates micro-structure features (Volume, Bollinger Bands, MACD), and loads a serialized `HistGradientBoostingClassifier` [cite: 1]. It returns a calibrated probability score that must cross a high "Precision Floor" to trigger a Buy signal [cite: 1].
+* **The Portfolio Execution Service (Platform Engineering):** Python, Alpaca Trade API (`main.py`). A scheduled worker that orchestrates the daily loop: running the scanner, querying the Rating Engine, calculating 5% position sizes based on current account equity, deploying trailing stop-losses, and logging daily performance against the SPY benchmark [cite: 1].
+* **The Dashboard (User Interface):** Node.js, Express. Portfolio view, P/L, and comparison against a "Buy & Hold SPY" equivalent [cite: 1].
 
 ## 3. Development Environment Setup
-To maintain consistency across both macOS and Windows workstations during development, the project should utilize:
-* **Docker:** Containerize the Flask API and Node.js dashboard to eliminate cross-platform environment discrepancies.
-* **Git/GitHub:** Strict version control for seamless syncing between machines.
-* **Virtual Environments (`venv`):** For isolated Python dependencies.
+* **Docker:** Containerize the API and dashboard for seamless execution across macOS and Windows development environments [cite: 1].
+* **Git/GitHub:** Strict version control tracking the feature specification pipeline and training scripts [cite: 1].
+* **Virtual Environments (`venv`):** Isolated Python dependencies [cite: 1].
+* **Model Artifacts:** The trained `rating_model.joblib` is treated as a release asset, complete with embedded metadata detailing its precision threshold and permutation importances [cite: 1].
 
 ## 4. Phased Development Roadmap
 
-### Phase 1: Infrastructure & Data Pipelines
-* Initialize the Git repository and define a `docker-compose.yml` file.
-* Set up the Flask application skeleton.
-* Integrate a market data API (e.g., `yfinance` or Alpha Vantage) to pull daily historical data for a target list of tickers.
+### Phase 1: Infrastructure & Dynamic Scanning
+* Initialize Git, virtual environments, and baseline API structures [cite: 1].
+* Develop `scripts/scanner.py` using Finviz to filter the 8,000+ US equity universe down to a top 50 daily watchlist based on Market Cap (> $2B), Average Volume (> 2M), and Top Gainer momentum [cite: 1].
 
-### Phase 2: The Rating Algorithm
-* Implement the core logic using Pandas to process time-series data.
-* Develop a weighted scoring system:
-    * **Moving Averages:** Trend confirmation.
-    * **RSI:** Momentum and overbought/oversold detection.
-* Expose an internal API endpoint: `GET /api/rating/<ticker>` returning `{"ticker": "AAPL", "rating": "Strong Buy", "score": 85}`.
+### Phase 2: The Micro-Structure ML Engine (Swing Trading)
+* **Target Variable:** Predict a Volatility-Adjusted return (Forward 5-day close > current close + 1.0 * 14-day ATR) [cite: 1].
+* **Feature Engineering:** Build Pandas pipelines exclusively focused on micro-structure and momentum (ignoring macro-regime data to prevent multicollinearity) [cite: 1].
+    * *Momentum:* MACD Histogram 3-day difference [cite: 1].
+    * *Institutional Footprints:* Relative Volume (20-day average) [cite: 1].
+    * *Volatility Squeeze:* Bollinger Band Width [cite: 1].
+    * *Price Context:* Distance from 20-day High [cite: 1].
+* **Training & Evaluation:** Use `TimeSeriesSplit` to prevent look-ahead bias [cite: 1]. Optimize the probability threshold strictly for **Precision** (avoiding false positives) [cite: 1]. Validate feature validity using Permutation Importance [cite: 1].
 
-### Phase 3: Alpaca Integration & Execution
-* Generate Alpaca Paper Trading API keys.
-* Write the execution script that iterates through a watchlist, requests ratings from the local Flask API, and fires `api.submit_order()` for "Strong Buy" signals.
-* Implement basic risk management (e.g., ensuring no single asset exceeds 10% of total buying power).
+### Phase 3: Portfolio Management & Execution (Alpaca Integration)
+* Develop `main.py` as the autonomous orchestrator [cite: 1].
+* **Position Sizing:** Dynamically calculate trade sizes to equal exactly 5% of the total current portfolio equity (max 20 concurrent positions) [cite: 1].
+* **Risk Management:** Implement automated Trailing Stop-Losses via the Alpaca API to cut losing trades quickly [cite: 1].
+* **Benchmarking:** At the close of each run, log the portfolio's total equity alongside the `spy_equivalent_value` to track the generated Alpha [cite: 1].
 
-### Phase 4: The Node.js Dashboard
-* Set up an Express server to serve the frontend.
-* Use the Alpaca API to fetch account data (`api.get_account()`) and current positions (`api.list_positions()`).
-* Visualize portfolio growth and current holdings using a charting library like Chart.js.
+### Phase 4: The Benchmarking Dashboard
+* Develop a Node.js/Express frontend using Chart.js [cite: 1].
+* Visualize the portfolio's growth curve overlaid directly against the S&P 500 benchmark [cite: 1].
+* Display active holdings, their current P/L, and the model's metadata (last trained date, current precision floor) [cite: 1].
 
 ## 5. Portfolio & Career Alignment
-This architecture directly supports building a highly competitive resume for advanced technical roles:
-* **Data Science:** Showcases time-series data manipulation, algorithm design, and quantitative analysis using Pandas.
-* **Platform Engineering:** Demonstrates experience designing independent microservices, managing secure API integrations, scheduling automated tasks, and containerizing full-stack applications.
+This architecture is structured to simulate a professional quantitative environment, acting as a high-tier resume asset [cite: 1]:
+* **Quantitative Data Science:** Showcases the ability to handle severe time-series challenges (look-ahead bias, multicollinearity), optimize models for precision over raw accuracy, and utilize Permutation Importance to extract actionable signals from noisy financial data [cite: 1].
+* **Platform & Financial Engineering:** Demonstrates the ability to build robust, automated execution pipelines, integrate external brokerage APIs, and crucially, implement strict capital protection algorithms (position sizing and trailing stops) required by modern financial institutions [cite: 1].
