@@ -22,6 +22,7 @@ from rating_engine.training_features import (
     FEATURE_COLUMNS as TA_FEATURE_COLUMNS,
     FEATURE_PIPELINE_ID,
     MIN_ROWS_TA_PIPELINE,
+    fetch_regime_features,
     latest_feature_row,
 )
 
@@ -55,9 +56,9 @@ def _adjusted_probability(p_pos: float, meta: dict[str, Any]) -> tuple[float, fl
 
 def _score_to_rating(score: float) -> str:
     s = int(round(score))
-    if s >= 80:
+    if s >= 75:
         return "Strong Buy"
-    if s >= 65:
+    if s >= 55:
         return "Buy"
     if s >= 40:
         return "Hold"
@@ -116,9 +117,17 @@ def clear_model_cache() -> None:
     _ARTIFACT = None
 
 
-def predict_from_ohlcv(ohlcv: pd.DataFrame) -> tuple[int, str, dict[str, Any]]:
+def predict_from_ohlcv(
+    ohlcv: pd.DataFrame,
+    *,
+    regime: pd.DataFrame | None = None,
+    fetch_regime_period: str | None = None,
+) -> tuple[int, str, dict[str, Any]]:
     """
     Latest-row prediction: score 0–100 from positive-class probability, plus label.
+
+    TA pipeline needs SPY/XLK regime columns: pass ``regime`` or ``fetch_regime_period``
+    (yfinance window, e.g. same as stock history).
     """
     art = load_artifact()
     meta = art.get("meta") or {}
@@ -134,7 +143,10 @@ def predict_from_ohlcv(ohlcv: pd.DataFrame) -> tuple[int, str, dict[str, Any]]:
                 f"Need at least {MIN_ROWS_TA_PIPELINE} trading days for TA pipeline; "
                 f"got {len(ohlcv)}. Try ?period=2y or ?period=max."
             )
-        X = latest_feature_row(ohlcv)
+        if regime is None:
+            per = fetch_regime_period or str(meta.get("period") or "2y")
+            regime = fetch_regime_features(period=per)
+        X = latest_feature_row(ohlcv, regime)
     else:
         if len(ohlcv) < MIN_ROWS_FOR_FEATURES:
             raise ValueError(
@@ -172,7 +184,7 @@ def rating_for_ticker(
     sym = ticker.strip().upper()
     load_artifact()
     ohlcv = fetch_daily_history(sym, period=period)
-    score, rating, details = predict_from_ohlcv(ohlcv)
+    score, rating, details = predict_from_ohlcv(ohlcv, fetch_regime_period=period)
     out: dict[str, Any] = {"ticker": sym, "rating": rating, "score": score}
     if include_details:
         out["period"] = period

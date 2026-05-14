@@ -12,4 +12,5 @@ build/
 .mypy_cache/
 .DS_Store
 models/*.joblib
+dashboard/node_modules/
 .spy_last_good_close.json

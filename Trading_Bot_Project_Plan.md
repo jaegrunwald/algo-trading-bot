@@ -1,5 +1,7 @@
 # Quantitative Portfolio Management & Algorithmic Trading System
 
+**Repo map and entry points:** [ARCHITECTURE.md](./ARCHITECTURE.md)
+
 ## 1. Project Overview
 A fully automated, machine learning-driven portfolio management system designed to actively trade a simulated $100,000 Alpaca brokerage account [cite: 1]. The objective is to consistently outperform the S&P 500 (SPY) benchmark [cite: 1]. The system utilizes a dynamic pre-market scanner to find high-liquidity stocks in play, applies a precision-tuned classification model to detect volatility squeezes and momentum, and executes trades autonomously with strict position sizing and automated risk management [cite: 1].
 

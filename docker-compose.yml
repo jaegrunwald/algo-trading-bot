@@ -1,3 +1,4 @@
+# Compose stack: Flask rating-engine + Node dashboard (see ARCHITECTURE.md).
 services:
   rating-engine:
     build: .
@@ -11,3 +12,20 @@ services:
     volumes:
       - ./rating_engine:/app/rating_engine
       - ./models:/app/models
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "${DASHBOARD_HOST_PORT:-3000}:3000"
+    environment:
+      - DASHBOARD_PORT=3000
+      - DASHBOARD_LISTEN_HOST=0.0.0.0
+      - RATING_ENGINE_URL=http://rating-engine:5000
+      - PORTFOLIO_STATS_PATH=/workspace/portfolio_stats.csv
+      - APCA_API_KEY_ID=${APCA_API_KEY_ID:-}
+      - APCA_API_SECRET_KEY=${APCA_API_SECRET_KEY:-}
+      - ALPACA_PAPER=${ALPACA_PAPER:-true}
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      - rating-engine

@@ -1,4 +1,4 @@
-"""Flask application skeleton for the Rating Engine."""
+"""Flask app: JSON/HTML rating endpoints, OHLCV tables, model metadata."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ import os
 from urllib.parse import quote, urlencode
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request, Response
+from flask import Flask, Response, jsonify, request
 from markupsafe import escape
 
+from rating_engine.ai_rating import load_artifact, model_info
 from rating_engine.config import get_watchlist_tickers
 from rating_engine.market_data import dataframe_to_records, fetch_daily_history
-from rating_engine.ai_rating import load_artifact, model_info
 from rating_engine.rating import rating_for_ticker as ml_rating_for_ticker
 
 load_dotenv()

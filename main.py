@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-Alpaca paper-trading runner: Finviz watchlist → ML rating → 5% equity Strong Buy entries
-with 5% trailing stop exits; append performance vs SPY buy-and-hold to portfolio_stats.csv.
-
-SPY benchmark is primed at run start (before per-ticker yfinance). Throttle sleep between tickers
-via YF_THROTTLE_SEC (default 1s) to reduce Yahoo Finance rate limits.
+Alpaca runner: Finviz watchlist → ML scores → optional long entries and protective exits;
+appends rows to ``portfolio_stats.csv``. Flags and env are documented in ``.env.example``;
+repo layout is in ``ARCHITECTURE.md`` (do not duplicate long behavior docs here).
 """
 
 from __future__ import annotations
@@ -43,6 +41,7 @@ from alpaca.trading.enums import OrderSide, OrderType, QueryOrderStatus, TimeInF
 from alpaca.trading.requests import (
     GetOrdersRequest,
     MarketOrderRequest,
+    StopOrderRequest,
     TrailingStopOrderRequest,
 )
 
@@ -52,8 +51,17 @@ from scanner import get_finviz_watchlist
 logger = logging.getLogger(__name__)
 
 STRONG_BUY = "Strong Buy"
+# Worst → best; used with ENTRY_MIN_RATING (e.g. Buy → enter on Buy or Strong Buy).
+_RATING_LADDER: tuple[str, ...] = (
+    "Strong Sell",
+    "Sell",
+    "Hold",
+    "Buy",
+    "Strong Buy",
+)
 POSITION_PCT_EQUITY = 0.05
 TRAIL_PCT = 5.0
+MAX_CONCURRENT_POSITIONS = int(os.environ.get("MAX_CONCURRENT_POSITIONS", "20"))
 MIN_NOTIONAL_USD = 1.0
 BASELINE_SPY_PATH = ROOT / ".portfolio_spy_baseline.json"
 SPY_LAST_GOOD_PATH = ROOT / ".spy_last_good_close.json"
@@ -62,6 +70,48 @@ FILL_POLL_SEC = 2.0
 FILL_POLL_ATTEMPTS = 15
 # Pause between yfinance-heavy ML calls to reduce Yahoo throttling (seconds).
 YF_THROTTLE_AFTER_TICKER = float(os.environ.get("YF_THROTTLE_SEC", "1.0"))
+
+
+def _normalize_entry_min_rating(raw: str | None) -> str:
+    """ENTRY_MIN_RATING: minimum ML label that qualifies for a new long (default Strong Buy)."""
+    s = (raw or STRONG_BUY).strip()
+    if not s:
+        return STRONG_BUY
+    for label in _RATING_LADDER:
+        if label.lower() == s.lower():
+            return label
+    logger.warning(
+        "Unknown ENTRY_MIN_RATING=%r — use one of %s; using Strong Buy",
+        raw,
+        ", ".join(_RATING_LADDER),
+    )
+    return STRONG_BUY
+
+
+def _rating_at_or_above_minimum(rating: object, minimum_label: str) -> bool:
+    if not isinstance(rating, str):
+        return False
+    r = rating.strip()
+    if r not in _RATING_LADDER or minimum_label not in _RATING_LADDER:
+        return False
+    return _RATING_LADDER.index(r) >= _RATING_LADDER.index(minimum_label)
+
+
+def _wl(i: int, n: int, symbol: str) -> str:
+    """Left prefix for watchlist progress lines (aligned index)."""
+    w = max(2, len(str(n)))
+    return f"[{i:>{w}}/{n}] {symbol:<6}"
+
+
+def _score_snippet(out: dict) -> str:
+    """0–100 model score from rating_for_ticker (for terminal visibility)."""
+    s = out.get("score")
+    if s is None:
+        return "score=—"
+    try:
+        return f"score={int(s)}"
+    except (TypeError, ValueError):
+        return f"score={s!r}"
 
 
 def _order_status_value(status: object) -> str:
@@ -142,7 +192,27 @@ def _position_map(client: TradingClient) -> dict[str, float]:
     return out
 
 
-def _has_open_trailing_stop_sell(client: TradingClient, symbol: str) -> bool:
+def _long_position_count(positions: dict[str, float]) -> int:
+    """Count symbols with a positive long quantity (plan: cap concurrent positions)."""
+    return sum(1 for q in positions.values() if q > 0)
+
+
+def _is_whole_share_qty(qty: float) -> bool:
+    """True if qty is an integer share count (Alpaca allows GTC trailing stops for whole shares only)."""
+    return abs(qty - round(qty)) < 1e-5
+
+
+_PROTECTIVE_EXIT_ORDER_TYPES = frozenset(
+    {
+        OrderType.TRAILING_STOP,
+        OrderType.STOP,
+        OrderType.STOP_LIMIT,
+    }
+)
+
+
+def _has_open_protective_sell(client: TradingClient, symbol: str) -> bool:
+    """Any open protective SELL (trailing / stop / stop-limit) for this symbol."""
     req = GetOrdersRequest(
         status=QueryOrderStatus.OPEN,
         symbols=[symbol],
@@ -154,9 +224,31 @@ def _has_open_trailing_stop_sell(client: TradingClient, symbol: str) -> bool:
         logger.warning("Could not list open orders for %s: %s", symbol, e)
         return False
     for o in orders:
-        if o.type == OrderType.TRAILING_STOP:
+        if o.type in _PROTECTIVE_EXIT_ORDER_TYPES:
             return True
     return False
+
+
+def _reference_price_for_long_stop(client: TradingClient, symbol: str) -> float | None:
+    """Use Alpaca position mark; avoids an extra market-data client."""
+    try:
+        pos = client.get_open_position(symbol)
+    except Exception as e:
+        logger.warning("get_open_position %s: %s", symbol, e)
+        return None
+    for attr in ("current_price", "avg_entry_price"):
+        raw = getattr(pos, attr, None)
+        if raw is None:
+            continue
+        v = float(raw)
+        if v > 0:
+            return v
+    return None
+
+
+def _fixed_stop_price_below_reference(ref: float, trail_pct: float) -> float:
+    """Long protective stop: trail_pct% below reference (approximates initial trailing distance)."""
+    return max(0.01, round(ref * (1.0 - trail_pct / 100.0), 2))
 
 
 def ensure_trailing_stop_for_long(
@@ -166,24 +258,102 @@ def ensure_trailing_stop_for_long(
     *,
     dry_run: bool,
 ) -> None:
-    """One GTC trailing stop sell at TRAIL_PCT off high watermark, full position qty."""
+    """
+    Protective exit for a long: GTC trailing stop when qty is whole shares.
+
+    Fractional positions cannot use trailing_stop on Alpaca; we submit a fixed ``stop`` sell
+    at TRAIL_PCT below the position reference price (DAY), which is not a true trailing stop.
+    """
     if qty <= 0:
         return
-    if _has_open_trailing_stop_sell(client, symbol):
-        logger.debug("Trailing stop already open for %s", symbol)
+    if _has_open_protective_sell(client, symbol):
+        logger.debug("Protective exit order already open for %s", symbol)
         return
-    trail_req = TrailingStopOrderRequest(
+
+    if _is_whole_share_qty(qty):
+        trail_req = TrailingStopOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.GTC,
+            trail_percent=TRAIL_PCT,
+        )
+        if dry_run:
+            logger.info(
+                "[dry-run] Trailing stop sell %s qty=%s trail_percent=%s GTC",
+                symbol,
+                qty,
+                TRAIL_PCT,
+            )
+            return
+        client.submit_order(order_data=trail_req)
+        logger.info(
+            "Submitted trailing stop sell %s qty=%s trail_percent=%s%% tif=gtc",
+            symbol,
+            qty,
+            TRAIL_PCT,
+        )
+        return
+
+    ref = _reference_price_for_long_stop(client, symbol)
+    if ref is None:
+        ref = _yf_last_price(symbol)
+    if ref is None or ref <= 0:
+        logger.error(
+            "Cannot place fractional protective stop for %s: no reference price (Alpaca position or yfinance).",
+            symbol,
+        )
+        return
+
+    stop_px = _fixed_stop_price_below_reference(ref, TRAIL_PCT)
+    if stop_px >= ref:
+        logger.error(
+            "Computed stop_price=%.4f not below reference=%.4f for %s; skip stop order.",
+            stop_px,
+            ref,
+            symbol,
+        )
+        return
+
+    stop_req = StopOrderRequest(
         symbol=symbol,
         qty=qty,
         side=OrderSide.SELL,
-        time_in_force=TimeInForce.GTC,
-        trail_percent=TRAIL_PCT,
+        time_in_force=TimeInForce.DAY,
+        stop_price=stop_px,
     )
     if dry_run:
-        logger.info("[dry-run] Trailing stop sell %s qty=%s trail_percent=%s GTC", symbol, qty, TRAIL_PCT)
+        logger.info(
+            "[dry-run] Fractional long %s: stop sell qty=%s stop_price=%.2f (~%.1f%% below ref %.2f) DAY "
+            "(Alpaca has no fractional trailing_stop)",
+            symbol,
+            qty,
+            stop_px,
+            TRAIL_PCT,
+            ref,
+        )
         return
-    client.submit_order(order_data=trail_req)
-    logger.info("Submitted trailing stop sell %s qty=%s trail_percent=%s%%", symbol, qty, TRAIL_PCT)
+    client.submit_order(order_data=stop_req)
+    logger.info(
+        "Submitted stop sell %s qty=%s stop_price=%.2f (~%.1f%% below ref %.2f) tif=day "
+        "(fractional long; trailing_stop not supported)",
+        symbol,
+        qty,
+        stop_px,
+        TRAIL_PCT,
+        ref,
+    )
+
+
+def _yf_last_price(symbol: str) -> float | None:
+    try:
+        hist = yf.Ticker(symbol).history(period="5d", auto_adjust=True)
+        if hist is not None and not hist.empty and "Close" in hist.columns:
+            v = float(hist["Close"].iloc[-1])
+            return v if v > 0 else None
+    except Exception as e:
+        logger.debug("yfinance last for %s: %s", symbol, e)
+    return None
 
 
 def ensure_all_longs_have_trailing_stops(
@@ -196,7 +366,64 @@ def ensure_all_longs_have_trailing_stops(
         try:
             ensure_trailing_stop_for_long(client, sym, qty, dry_run=dry_run)
         except Exception as e:
-            logger.error("Failed trailing stop for %s: %s", sym, e)
+            logger.error("Failed protective exit order for %s: %s", sym, e)
+
+
+def try_force_buy_entry(
+    client: TradingClient,
+    symbol: str | None,
+    *,
+    dry_run: bool,
+) -> None:
+    """
+    One notional market buy at POSITION_PCT_EQUITY of equity + trailing stop, skipping ML.
+    Respects max concurrent positions, existing long, and buying power (same gates as ML path).
+    """
+    if not symbol:
+        return
+    sym = symbol.strip().upper()
+    if not sym:
+        return
+    positions = _position_map(client)
+    if sym in positions and positions[sym] > 0:
+        logger.info("Force-buy: already long %s; skip.", sym)
+        return
+    if _long_position_count(positions) >= MAX_CONCURRENT_POSITIONS:
+        logger.warning(
+            "Force-buy: max concurrent positions (%d) reached; skip %s.",
+            MAX_CONCURRENT_POSITIONS,
+            sym,
+        )
+        return
+    account = client.get_account()
+    equity_now = float(account.equity)
+    target_notional = equity_now * POSITION_PCT_EQUITY
+    buying_power = float(account.buying_power)
+    if target_notional > buying_power:
+        logger.warning(
+            "Force-buy skip %s: need %.2f USD (5%% equity) but buying_power=%.2f",
+            sym,
+            target_notional,
+            buying_power,
+        )
+        return
+    logger.info(
+        "Force-buy: %s — entering %.2f USD (5%% of equity %.2f) (ML skipped)",
+        sym,
+        target_notional,
+        equity_now,
+    )
+    ok, shares_bought = submit_strong_buy_entry(client, sym, target_notional, dry_run=dry_run)
+    if ok:
+        q = shares_bought if shares_bought > 0 else _position_map(client).get(sym, 0.0)
+        if q > 0:
+            ensure_trailing_stop_for_long(client, sym, q, dry_run=dry_run)
+        elif dry_run:
+            logger.info(
+                "[dry-run] After fill would submit trailing stop SELL %s trail_percent=%s%% (DAY if fractional qty)",
+                sym,
+                TRAIL_PCT,
+            )
 
 
 def submit_strong_buy_entry(
@@ -207,26 +434,27 @@ def submit_strong_buy_entry(
     dry_run: bool,
 ) -> tuple[bool, float]:
     """
-    Submit a notional market BUY (GTC), poll for filled_qty, return (success, shares_bought).
+    Submit a notional market BUY (DAY; Alpaca fractional rule), poll for filled_qty, return (success, shares_bought).
 
     Trailing-stop placement should use the returned share count (falls back to position qty if needed).
     """
     if notional_usd < MIN_NOTIONAL_USD:
         logger.info("Skip %s: notional %.2f below minimum", symbol, notional_usd)
         return False, 0.0
+    # Notional market buys are fractional-style; Alpaca requires DAY (GTC → 422 fractional orders).
     mkt = MarketOrderRequest(
         symbol=symbol,
         notional=round(notional_usd, 2),
         side=OrderSide.BUY,
-        time_in_force=TimeInForce.GTC,
+        time_in_force=TimeInForce.DAY,
     )
     if dry_run:
-        logger.info("[dry-run] Market BUY %s notional=%.2f GTC", symbol, notional_usd)
+        logger.info("[dry-run] Market BUY %s notional=%.2f DAY", symbol, notional_usd)
         return True, 0.0
 
     placed = client.submit_order(order_data=mkt)
     oid = getattr(placed, "id", placed)
-    logger.info("Submitted market BUY %s notional=%.2f GTC order_id=%s", symbol, notional_usd, oid)
+    logger.info("Submitted market BUY %s notional=%.2f DAY order_id=%s", symbol, notional_usd, oid)
 
     for _ in range(FILL_POLL_ATTEMPTS):
         time.sleep(FILL_POLL_SEC)
@@ -430,45 +658,93 @@ def run(
     stats_csv: Path,
     watchlist_limit: int,
     ml_period: str,
+    force_buy: str | None,
 ) -> None:
     initial_capital = float(os.environ.get("INITIAL_CAPITAL", "100000"))
     # SPY first — before dozens of per-ticker yfinance calls (rate-limit friendly).
     spy_anchor = prime_spy_benchmark(initial_capital)
+    entry_min = _normalize_entry_min_rating(os.environ.get("ENTRY_MIN_RATING"))
 
     client = _try_trading_client(dry_run=dry_run)
     if client is None:
         equity_sim = float(os.environ.get("DRY_RUN_EQUITY", "100000"))
         logger.info("Offline dry-run: simulated equity=%.2f", equity_sim)
+        logger.info("ML entry threshold: %s or better", entry_min)
+        fb = (force_buy or "").strip().upper()
+        if fb:
+            target = equity_sim * POSITION_PCT_EQUITY
+            logger.info(
+                "[offline dry-run] --force-buy %s: would market BUY notional=%.2f (5%% of %.2f) "
+                "then %.1f%% trailing stop (DAY if fractional qty; set Alpaca keys to send real orders).",
+                fb,
+                target,
+                equity_sim,
+                TRAIL_PCT,
+            )
         tickers = get_finviz_watchlist(limit=watchlist_limit)
+        dry_run_positions: set[str] = set()
         if not tickers:
             logger.warning("Empty Finviz watchlist.")
         else:
             logger.info("Watchlist size=%d", len(tickers))
-        for sym in tickers:
-            sym = sym.strip().upper()
+            logger.info("--- watchlist ML pass (%d tickers) ---", len(tickers))
+        n_wl = len(tickers)
+        for i, sym_raw in enumerate(tickers, start=1):
+            sym = sym_raw.strip().upper()
             if not sym:
                 continue
             try:
+                if sym in dry_run_positions:
+                    logger.info("%s | already in sim portfolio — skip", _wl(i, n_wl, sym))
+                    continue
+                if len(dry_run_positions) >= MAX_CONCURRENT_POSITIONS:
+                    logger.info(
+                        "%s | max concurrent positions (%d) — stop entries",
+                        _wl(i, n_wl, sym),
+                        MAX_CONCURRENT_POSITIONS,
+                    )
+                    break
                 try:
                     out = rating_for_ticker(sym, period=ml_period, include_details=False)
                 except Exception as e:
+                    err = str(e).strip().replace("\n", " ")[:100]
+                    logger.info("%s | ML failed — skip (%s)", _wl(i, n_wl, sym), err)
                     logger.warning("ML rating failed for %s: %s", sym, e)
                     continue
-                if out.get("rating") != STRONG_BUY:
-                    logger.debug("%s rating=%s (not Strong Buy)", sym, out.get("rating"))
+                rating = out.get("rating")
+                if not _rating_at_or_above_minimum(rating, entry_min):
+                    logger.info(
+                        "%s | %s rating=%s — below %s — skip",
+                        _wl(i, n_wl, sym),
+                        _score_snippet(out),
+                        rating,
+                        entry_min,
+                    )
+                    logger.debug(
+                        "%s %s rating=%s (below ENTRY_MIN_RATING=%s)",
+                        sym,
+                        _score_snippet(out),
+                        rating,
+                        entry_min,
+                    )
                     continue
                 target = equity_sim * POSITION_PCT_EQUITY
+                dry_run_positions.add(sym)
                 logger.info(
-                    "[offline dry-run] Would BUY %s notional=%.2f (5%% of %.2f); "
-                    "then place %.1f%% trailing stop GTC",
-                    sym,
+                    "%s | %s rating=%s — would BUY $%.2f (5%% of %.2f) + exits | sim %d/%d",
+                    _wl(i, n_wl, sym),
+                    _score_snippet(out),
+                    rating,
                     target,
                     equity_sim,
-                    TRAIL_PCT,
+                    len(dry_run_positions),
+                    MAX_CONCURRENT_POSITIONS,
                 )
             finally:
                 if YF_THROTTLE_AFTER_TICKER > 0:
                     time.sleep(YF_THROTTLE_AFTER_TICKER)
+        if tickers:
+            logger.info("--- watchlist ML pass done ---")
         spy_equiv, _ = spy_equivalent_value(initial_capital, spy_anchor=spy_anchor)
         append_portfolio_stats(
             stats_csv,
@@ -479,72 +755,133 @@ def run(
 
     account = client.get_account()
     logger.info(
-        "Account equity=%.2f portfolio_value=%.2f paper=%s",
+        "Account equity=%.2f portfolio_value=%.2f paper=%s max_concurrent_positions=%d",
         float(account.equity),
         float(getattr(account, "portfolio_value", None) or account.equity),
         os.environ.get("ALPACA_PAPER", "true"),
+        MAX_CONCURRENT_POSITIONS,
     )
+    logger.info("ML entry threshold: %s or better", entry_min)
 
     positions = _position_map(client)
     ensure_all_longs_have_trailing_stops(client, positions, dry_run=dry_run)
+
+    positions = _position_map(client)
+    longs = {s: q for s, q in positions.items() if q > 0}
+    if longs:
+        parts = [f"{s} {q:g}" for s, q in sorted(longs.items())]
+        shown = parts[:15]
+        extra = f", … (+{len(parts) - len(shown)} more)" if len(parts) > len(shown) else ""
+        logger.info("Open longs: %s%s", ", ".join(shown), extra)
+    else:
+        logger.info("Open longs: (none)")
+
+    try_force_buy_entry(client, force_buy, dry_run=dry_run)
 
     tickers = get_finviz_watchlist(limit=watchlist_limit)
     if not tickers:
         logger.warning("Empty Finviz watchlist; skipping entries.")
     else:
         logger.info("Watchlist size=%d", len(tickers))
-
-    for sym in tickers:
-        sym = sym.strip().upper()
-        if not sym:
-            continue
-        try:
-            positions = _position_map(client)
-            if sym in positions and positions[sym] > 0:
-                logger.debug("Already long %s; skip entry", sym)
+        logger.info("--- watchlist ML pass (%d tickers) ---", len(tickers))
+        n_wl = len(tickers)
+        for i, sym_raw in enumerate(tickers, start=1):
+            sym = sym_raw.strip().upper()
+            if not sym:
                 continue
             try:
-                out = rating_for_ticker(sym, period=ml_period, include_details=False)
-            except Exception as e:
-                logger.warning("ML rating failed for %s: %s", sym, e)
-                continue
-            if out.get("rating") != STRONG_BUY:
-                logger.debug("%s rating=%s (not Strong Buy)", sym, out.get("rating"))
-                continue
-
-            account = client.get_account()
-            equity_now = float(account.equity)
-            target_notional = equity_now * POSITION_PCT_EQUITY
-            buying_power = float(account.buying_power)
-            if target_notional > buying_power:
-                logger.warning(
-                    "Skip %s: need %.2f USD (5%% equity) but buying_power=%.2f",
-                    sym,
-                    target_notional,
-                    buying_power,
-                )
-                continue
-
-            logger.info(
-                "Strong Buy: %s — entering %.2f USD (5%% of equity %.2f)",
-                sym,
-                target_notional,
-                equity_now,
-            )
-            ok, shares_bought = submit_strong_buy_entry(client, sym, target_notional, dry_run=dry_run)
-            if ok:
-                q = shares_bought if shares_bought > 0 else _position_map(client).get(sym, 0.0)
-                if q > 0:
-                    ensure_trailing_stop_for_long(client, sym, q, dry_run=dry_run)
-                elif dry_run:
+                positions = _position_map(client)
+                if sym in positions and positions[sym] > 0:
+                    logger.info("%s | already long — skip", _wl(i, n_wl, sym))
+                    continue
+                if _long_position_count(positions) >= MAX_CONCURRENT_POSITIONS:
                     logger.info(
-                        "[dry-run] After fill would submit trailing stop SELL %s trail_percent=%s%% GTC",
-                        sym,
-                        TRAIL_PCT,
+                        "%s | max concurrent positions (%d) — stop entries",
+                        _wl(i, n_wl, sym),
+                        MAX_CONCURRENT_POSITIONS,
                     )
-        finally:
-            if YF_THROTTLE_AFTER_TICKER > 0:
-                time.sleep(YF_THROTTLE_AFTER_TICKER)
+                    break
+                try:
+                    out = rating_for_ticker(sym, period=ml_period, include_details=False)
+                except Exception as e:
+                    err = str(e).strip().replace("\n", " ")[:100]
+                    logger.info("%s | ML failed — skip (%s)", _wl(i, n_wl, sym), err)
+                    logger.warning("ML rating failed for %s: %s", sym, e)
+                    continue
+                rating = out.get("rating")
+                if not _rating_at_or_above_minimum(rating, entry_min):
+                    logger.info(
+                        "%s | %s rating=%s — below %s — skip",
+                        _wl(i, n_wl, sym),
+                        _score_snippet(out),
+                        rating,
+                        entry_min,
+                    )
+                    logger.debug(
+                        "%s %s rating=%s (below ENTRY_MIN_RATING=%s)",
+                        sym,
+                        _score_snippet(out),
+                        rating,
+                        entry_min,
+                    )
+                    continue
+
+                account = client.get_account()
+                equity_now = float(account.equity)
+                target_notional = equity_now * POSITION_PCT_EQUITY
+                buying_power = float(account.buying_power)
+                if target_notional > buying_power:
+                    logger.info(
+                        "%s | %s rating=%s — skip (need $%.2f, buying_power $%.2f)",
+                        _wl(i, n_wl, sym),
+                        _score_snippet(out),
+                        rating,
+                        target_notional,
+                        buying_power,
+                    )
+                    continue
+
+                logger.info(
+                    "%s | %s rating=%s — entering $%.2f (5%% of equity %.2f)",
+                    _wl(i, n_wl, sym),
+                    _score_snippet(out),
+                    rating,
+                    target_notional,
+                    equity_now,
+                )
+                ok, shares_bought = submit_strong_buy_entry(client, sym, target_notional, dry_run=dry_run)
+                if ok:
+                    q = shares_bought if shares_bought > 0 else _position_map(client).get(sym, 0.0)
+                    if q > 0:
+                        ensure_trailing_stop_for_long(client, sym, q, dry_run=dry_run)
+                        logger.info(
+                            "%s | %s entry done — ~%.4f sh, protective exit submitted",
+                            _wl(i, n_wl, sym),
+                            _score_snippet(out),
+                            q,
+                        )
+                    elif dry_run:
+                        logger.info(
+                            "%s | %s [dry-run] BUY logged; would add protective exit after fill (trail/stop per Alpaca rules)",
+                            _wl(i, n_wl, sym),
+                            _score_snippet(out),
+                        )
+                    else:
+                        logger.info(
+                            "%s | %s BUY accepted but qty still 0 — check broker / fill",
+                            _wl(i, n_wl, sym),
+                            _score_snippet(out),
+                        )
+                else:
+                    logger.info(
+                        "%s | %s BUY did not complete — skip",
+                        _wl(i, n_wl, sym),
+                        _score_snippet(out),
+                    )
+            finally:
+                if YF_THROTTLE_AFTER_TICKER > 0:
+                    time.sleep(YF_THROTTLE_AFTER_TICKER)
+        logger.info("--- watchlist ML pass done ---")
 
     account = client.get_account()
     total_portfolio_value = float(
@@ -559,7 +896,10 @@ def run(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Alpaca paper portfolio: ML Strong Buy + trailing stops + stats.")
+    p = argparse.ArgumentParser(
+        description="Alpaca paper portfolio: ML-rated entries + protective exits + stats. "
+        "Relax buys with env ENTRY_MIN_RATING (e.g. Buy).",
+    )
     p.add_argument(
         "--dry-run",
         action="store_true",
@@ -577,7 +917,21 @@ def main() -> None:
         default=os.environ.get("ML_RATING_PERIOD", "2y"),
         help="yfinance history window for feature warm-up (default 2y).",
     )
-    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument(
+        "--force-buy",
+        metavar="SYMBOL",
+        default=None,
+        help=(
+            "Smoke test: one market buy at 5%% equity + trailing stop, skipping ML "
+            "(requires Alpaca keys; with no keys, offline dry-run only logs intent)."
+        ),
+    )
+    p.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="DEBUG logging (per-ticker progress is already INFO by default).",
+    )
     args = p.parse_args()
     _configure_logging(args.verbose)
     try:
@@ -586,6 +940,7 @@ def main() -> None:
             stats_csv=args.stats_csv,
             watchlist_limit=args.watchlist_limit,
             ml_period=args.ml_period,
+            force_buy=args.force_buy,
         )
     except Exception:
         logger.exception("Run failed")

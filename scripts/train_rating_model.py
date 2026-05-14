@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Train the rating classifier: volatility-adjusted target, swing features (BB squeeze, 20d high, MACD, volume).
+Train the rating classifier: volatility-adjusted target, swing features (BB width, MACD, volume).
 
-Target: close_{t+5} > close_t + 1.0 * ATR_14(t). Strict TimeSeriesSplit CV.
-Threshold tuning: precision with min recall 0.20 on OOF probabilities.
+Target: close.shift(-h) > close + m * ATR_w (defaults h=10, w=14, m=1; SPY+XLK regime merged by date).
+Strict TimeSeriesSplit CV. Threshold tuning: precision with min recall 0.20 on OOF probabilities.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from rating_engine.training_features import (
     FEATURE_PIPELINE_ID,
     FORWARD_DAYS,
     build_training_frame_from_ohlcv,
+    fetch_regime_features,
 )
 
 
@@ -75,6 +76,10 @@ def _stack_panel(
     tickers: list[str],
     *,
     period: str,
+    regime: pd.DataFrame,
+    forward_days: int,
+    atr_window: int,
+    atr_mult: float,
 ) -> pd.DataFrame:
     parts: list[pd.DataFrame] = []
     for sym in tickers:
@@ -82,7 +87,13 @@ def _stack_panel(
         if not sym:
             continue
         raw = fetch_daily_history(sym, period=period)
-        block = build_training_frame_from_ohlcv(raw)
+        block = build_training_frame_from_ohlcv(
+            raw,
+            regime,
+            forward_days=forward_days,
+            atr_window=atr_window,
+            atr_mult=atr_mult,
+        )
         block["ticker"] = sym
         parts.append(block)
     if not parts:
@@ -98,9 +109,9 @@ def _make_classifier(name: str, seed: int) -> Any:
             max_iter=500,
             learning_rate=0.04,
             max_depth=5,
-            min_samples_leaf=80,
+            min_samples_leaf=100,
             max_leaf_nodes=31,
-            l2_regularization=2.0,
+            l2_regularization=2.5,
             class_weight="balanced",
             random_state=seed,
             early_stopping=True,
@@ -129,9 +140,9 @@ def _make_classifier_final(name: str, seed: int) -> Any:
             max_iter=550,
             learning_rate=0.04,
             max_depth=5,
-            min_samples_leaf=70,
+            min_samples_leaf=90,
             max_leaf_nodes=31,
-            l2_regularization=2.0,
+            l2_regularization=2.5,
             class_weight="balanced",
             random_state=seed,
             early_stopping=False,
@@ -229,14 +240,48 @@ def print_permutation_importance_table(
     return rows
 
 
+def _sample_weight_for_fit(y: np.ndarray, neg_boost: float) -> np.ndarray:
+    """
+    Balanced per-class sample weights, then optional extra weight on class 0 rows.
+
+    Use ``neg_boost`` > 1.0 when the model collapses to predicting positive at p>0.5
+    (high recall / low precision on class 1): it penalizes false positives in the loss.
+    """
+    sw = compute_sample_weight("balanced", y).astype(np.float64, copy=True)
+    if neg_boost > 1.0:
+        sw[y == 0] *= float(neg_boost)
+    return sw
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description=(
-            "Train rating model: ATR-adjusted target + swing (BB width, 20d high) + MACD/volume + TimeSeriesSplit."
+            "Train rating model: ATR-adjusted label + swing (BB width, MACD, volume) + TimeSeriesSplit."
         )
     )
     p.add_argument("--tickers", type=str, default=",".join(DEFAULT_TICKERS))
     p.add_argument("--period", type=str, default="5y", help="yfinance history window.")
+    p.add_argument(
+        "--forward-days",
+        type=int,
+        default=FORWARD_DAYS,
+        metavar="H",
+        help=f"Label: sessions ahead for forward close (default {FORWARD_DAYS}; 10 matches MACD/BB horizon).",
+    )
+    p.add_argument(
+        "--atr-window",
+        type=int,
+        default=ATR_WINDOW,
+        metavar="W",
+        help=f"Label: ATR rolling window (default {ATR_WINDOW}).",
+    )
+    p.add_argument(
+        "--atr-mult",
+        type=float,
+        default=ATR_TARGET_MULTIPLIER,
+        metavar="M",
+        help=f"Label: hurdle = close + M * ATR (default {ATR_TARGET_MULTIPLIER}). Try 0.75 for an easier positive class.",
+    )
     p.add_argument(
         "--classifier",
         choices=("hgb", "xgb"),
@@ -251,15 +296,49 @@ def main() -> None:
         default=True,
         help="Wrap final base estimator in sigmoid CalibratedClassifierCV(cv=3).",
     )
+    p.add_argument(
+        "--neg-sample-boost",
+        type=float,
+        default=1.0,
+        help=(
+            "After sklearn balanced sample weights, multiply weights on y=0 rows by this factor "
+            "(try 1.15–1.35 if OOF at 0.5 shows recall(class 1)≈1 and precision≈baseline only)."
+        ),
+    )
+    p.add_argument(
+        "--min-precision-floor",
+        type=float,
+        default=0.0,
+        help=(
+            "When tuning saved probability_floor, require at least this precision "
+            "(try 0.40–0.45 for stricter deploy; may relax min_predicted_positive if no candidate)."
+        ),
+    )
     p.add_argument("--out", type=Path, default=Path("models/rating_model.joblib"))
     args = p.parse_args()
     tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
 
+    fd = int(args.forward_days)
+    aw = int(args.atr_window)
+    am = float(args.atr_mult)
+    if fd < 1 or aw < 2 or am <= 0:
+        raise SystemExit("--forward-days must be >= 1, --atr-window >= 2, --atr-mult > 0.")
+    if args.neg_sample_boost < 1.0:
+        raise SystemExit("--neg-sample-boost must be >= 1.0.")
+
     print(
-        f"Building panel — target: close.shift(-{FORWARD_DAYS}) > close + "
-        f"{ATR_TARGET_MULTIPLIER} * ATR_{ATR_WINDOW}"
+        f"Building panel — target: close.shift(-{fd}) > close + {am} * ATR_{aw} "
+        f"(regime: SPY + XLK, period={args.period!r})"
     )
-    panel = _stack_panel(tickers, period=args.period)
+    regime = fetch_regime_features(period=args.period)
+    panel = _stack_panel(
+        tickers,
+        period=args.period,
+        regime=regime,
+        forward_days=fd,
+        atr_window=aw,
+        atr_mult=am,
+    )
     if len(panel) == 0:
         raise SystemExit(
             "No training rows after dropna (features/target NaN). "
@@ -268,6 +347,8 @@ def main() -> None:
     X = panel[FEATURE_COLUMNS].astype(np.float64)
     y = panel["y"].astype(int).values
     print(f"Rows after strict dropna: {len(panel)}, P(y=1)={y.mean():.4f}")
+    if args.neg_sample_boost > 1.0:
+        print(f"Using neg_sample_boost={args.neg_sample_boost} (extra loss weight on y=0 rows).")
 
     tscv = TimeSeriesSplit(n_splits=args.n_splits)
     oof_proba = np.full(len(panel), np.nan, dtype=float)
@@ -278,7 +359,7 @@ def main() -> None:
     print(f"\nTimeSeriesSplit (n_splits={args.n_splits}) — out-of-fold AUC:")
     for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
         clf = _make_classifier(args.classifier, args.seed + fold)
-        sw_tr = compute_sample_weight("balanced", y[train_idx])
+        sw_tr = _sample_weight_for_fit(y[train_idx], args.neg_sample_boost)
         clf.fit(X.iloc[train_idx], y[train_idx], sample_weight=sw_tr)
         X_te = X.iloc[test_idx]
         y_te = y[test_idx]
@@ -324,15 +405,12 @@ def main() -> None:
     valid_oof = np.isfinite(oof_proba)
     y_oof = y[valid_oof]
     p_oof = oof_proba[valid_oof]
+    p_pos_rate = float(y_oof.mean()) if len(y_oof) else 0.0
     print("\nOOF ROC-AUC (all labeled OOF rows):")
     try:
         print(f"  {roc_auc_score(y_oof, p_oof):.4f}")
     except ValueError as e:
         print(f"  skipped ({e})")
-
-    y_hat_oof = (p_oof >= 0.5).astype(int)
-    print("\nOOF classification report (threshold=0.5 on OOF probabilities):")
-    print(classification_report(y_oof, y_hat_oof, digits=4, zero_division=0))
 
     print("\nTuning probability floor for PRECISION (min recall 0.20) on OOF predictions...")
     tune_cfg = tune_probability_threshold(
@@ -340,15 +418,35 @@ def main() -> None:
         p_oof,
         mode="precision",
         min_recall=0.20,
-        min_precision=0.0,
+        min_precision=float(args.min_precision_floor),
         min_predicted_positive=40,
     )
-    print(f"  Chosen floor: {tune_cfg['probability_floor']:.4f}")
+    floor = float(tune_cfg["probability_floor"])
+    print(f"  Chosen floor: {floor:.4f}")
     print(
         f"  At floor — precision={tune_cfg['metrics_at_floor']['precision']:.4f}, "
         f"recall={tune_cfg['metrics_at_floor']['recall']:.4f}, "
         f"f1={tune_cfg['metrics_at_floor']['f1']:.4f}"
     )
+
+    y_hat_floor = (p_oof >= floor).astype(int)
+    print(
+        f"\nOOF classification report at **tuned floor** (threshold={floor:.4f}) — "
+        "this matches how Strong Buy / score uses probabilities in production:"
+    )
+    print(classification_report(y_oof, y_hat_floor, digits=4, zero_division=0))
+    print(
+        f"(Baseline positive rate P(y=1) in OOF rows: {p_pos_rate:.4f} — "
+        "compare precision on class 1 to this to see lift vs 'always long'.)"
+    )
+
+    y_hat_oof = (p_oof >= 0.5).astype(int)
+    print(
+        "\n--- Diagnostic only: OOF classification report at threshold=0.5 "
+        "(NOT used for Strong Buy; often looks like 'always predict long' when "
+        "calibrated scores are high.) ---"
+    )
+    print(classification_report(y_oof, y_hat_oof, digits=4, zero_division=0))
 
     print("\nFitting final model on full chronological panel...")
     base_final = _make_classifier_final(args.classifier, args.seed)
@@ -357,7 +455,7 @@ def main() -> None:
         print("  (CalibratedClassifierCV cv=3 — may take several minutes)")
     else:
         final_model = base_final
-    sw_full = compute_sample_weight("balanced", y)
+    sw_full = _sample_weight_for_fit(y, args.neg_sample_boost)
     final_model.fit(X, y, sample_weight=sw_full)
 
     trained_at = datetime.now(timezone.utc).isoformat()
@@ -372,22 +470,22 @@ def main() -> None:
             "period": args.period,
             "classifier": args.classifier,
             "calibrated": bool(args.calibrate),
+            "training": {
+                "neg_sample_boost": float(args.neg_sample_boost),
+            },
             "target": {
-                "forward_sessions": FORWARD_DAYS,
-                "atr_window": ATR_WINDOW,
-                "atr_multiplier": ATR_TARGET_MULTIPLIER,
-                "definition": (
-                    f"close.shift(-{FORWARD_DAYS}) > close + {ATR_TARGET_MULTIPLIER} * ATR_{ATR_WINDOW}"
-                ),
+                "forward_sessions": fd,
+                "atr_window": aw,
+                "atr_multiplier": am,
+                "definition": (f"close.shift(-{fd}) > close + {am} * ATR_{aw}"),
             },
             "features": {
                 "library": "ta",
                 "columns": list(FEATURE_COLUMNS),
                 "notes": (
-                    "macd_hist_diff_3: 3d change in MACD histogram; "
-                    "relative_volume_20d: Volume / 20d mean volume; "
-                    "bb_width: (Upper_BB - Lower_BB) / SMA20 (20d, 2*StdDev bands); "
-                    "dist_from_20d_high: (Close - rolling 20d max Close) / rolling 20d max Close."
+                    "macd_hist_diff_3, relative_volume_20d, bb_width: stock TA; "
+                    "spy_5d_return, spy_20d_return, spy_trend (SPY vs SMA20): market context; "
+                    "xlk_5d_return: XLK tech sector 5d return. Regime merged by calendar date."
                 ),
             },
             "evaluation": {
@@ -397,6 +495,9 @@ def main() -> None:
                 "mean_fold_roc_auc": float(np.mean(fold_aucs)) if fold_aucs else None,
                 "oof_classification_report_0.5": classification_report(
                     y_oof, y_hat_oof, digits=4, zero_division=0, output_dict=True
+                ),
+                "oof_classification_report_at_floor": classification_report(
+                    y_oof, y_hat_floor, digits=4, zero_division=0, output_dict=True
                 ),
                 "oof_roc_auc": float(roc_auc_score(y_oof, p_oof))
                 if len(np.unique(y_oof)) > 1
@@ -417,6 +518,7 @@ def main() -> None:
                 "probability_floor": tune_cfg["probability_floor"],
                 "tune_for": "precision",
                 "tune_min_recall": 0.20,
+                "tune_min_precision": float(args.min_precision_floor),
                 "score_transform": "excess_over_floor",
                 "metrics_at_floor": tune_cfg["metrics_at_floor"],
             },

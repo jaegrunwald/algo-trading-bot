@@ -1,3 +1,5 @@
+"""Small env helpers for the Flask app (not the Finviz-driven list in ``main.py``)."""
+
 import os
 
 

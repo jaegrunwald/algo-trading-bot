@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Dynamic watchlist: Finviz overview screener (mid/large cap, liquid, top gainers).
+Finviz-backed watchlist used by ``main.py`` (via ``get_finviz_watchlist``).
+
+Filters: mid+ market cap, volume over 2M, signal Top Gainers. Not the same as
+``WATCHLIST_TICKERS`` in ``rating_engine/config.py`` (that list is for the Flask app).
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ FILTERS: dict[str, str] = {
     "Average Volume": "Over 2M",
 }
 SIGNAL = "Top Gainers"
-DEFAULT_LIMIT = 50
+DEFAULT_LIMIT = 100
 
 
 def fetch_watchlist_tickers(*, limit: int = DEFAULT_LIMIT) -> list[str]:

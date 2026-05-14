@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trading bench — portfolio vs SPY</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+  <style>
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #0c1017;
+      --bg2: #121a24;
+      --card: #161f2c;
+      --card2: #1c2738;
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #e8edf4;
+      --muted: #8b9aaf;
+      --accent: #4d9fff;
+      --accent-dim: rgba(77, 159, 255, 0.15);
+      --spy: #ffb020;
+      --spy-dim: rgba(255, 176, 32, 0.12);
+      --pos: #3ddc97;
+      --neg: #ff6b6b;
+      --shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f0f3f8;
+      --bg2: #e4e9f1;
+      --card: #fff;
+      --card2: #f7f9fc;
+      --border: rgba(0, 0, 0, 0.08);
+      --text: #142032;
+      --muted: #5a6b82;
+      --accent: #0b5ed7;
+      --accent-dim: rgba(11, 94, 215, 0.1);
+      --spy: #c45c00;
+      --spy-dim: rgba(196, 92, 0, 0.1);
+      --pos: #0d8f5f;
+      --neg: #c62828;
+      --shadow: 0 2px 12px rgba(20, 32, 50, 0.08);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    a { color: var(--accent); }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 1rem 1.25rem 3rem; }
+    header.top {
+      display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between;
+      gap: 1rem; margin-bottom: 1.25rem; padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand h1 { margin: 0; font-size: 1.45rem; font-weight: 700; letter-spacing: -0.02em; }
+    .brand p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.9rem; max-width: 36rem; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    button.btn {
+      font: inherit; cursor: pointer; border: 1px solid var(--border);
+      background: var(--card2); color: var(--text); padding: 0.45rem 0.85rem; border-radius: 8px;
+      display: inline-flex; align-items: center; gap: 0.4rem;
+    }
+    button.btn:hover { background: var(--card); border-color: var(--accent); }
+    button.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .status-row { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.75rem; }
+    .pill {
+      font-size: 0.78rem; font-weight: 600; padding: 0.25rem 0.55rem; border-radius: 999px;
+      background: var(--card2); border: 1px solid var(--border); color: var(--muted);
+    }
+    .pill.ok { color: var(--pos); border-color: rgba(61, 220, 151, 0.35); background: rgba(61, 220, 151, 0.08); }
+    .pill.warn { color: #ffb74d; border-color: rgba(255, 183, 77, 0.35); }
+    .pill.err { color: var(--neg); border-color: rgba(255, 107, 107, 0.35); background: rgba(255, 107, 107, 0.08); }
+    nav.jump { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 1rem 0 0.5rem; }
+    nav.jump a {
+      font-size: 0.8rem; text-decoration: none; padding: 0.3rem 0.65rem; border-radius: 6px;
+      color: var(--muted); border: 1px solid transparent;
+    }
+    nav.jump a:hover { color: var(--text); border-color: var(--border); background: var(--card2); }
+    section.panel {
+      background: var(--card); border-radius: 12px; padding: 1.1rem 1.2rem; margin-bottom: 1rem;
+      box-shadow: var(--shadow); border: 1px solid var(--border);
+    }
+    section.panel h2 {
+      margin: 0 0 0.75rem; font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--muted);
+    }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.65rem; margin-bottom: 1rem; }
+    .kpi {
+      background: var(--card2); border-radius: 10px; padding: 0.75rem 0.85rem; border: 1px solid var(--border);
+    }
+    .kpi span { display: block; font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+    .kpi strong { display: block; margin-top: 0.25rem; font-size: 1.15rem; font-weight: 700; }
+    .kpi small { color: var(--muted); font-size: 0.78rem; }
+    .chart-wrap { position: relative; height: min(42vh, 380px); margin-top: 0.5rem; }
+    .table-scroll { overflow: auto; max-height: 280px; border-radius: 8px; border: 1px solid var(--border); margin-top: 0.75rem; }
+    table.data { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    table.data th, table.data td { padding: 0.45rem 0.55rem; text-align: right; border-bottom: 1px solid var(--border); }
+    table.data th:first-child, table.data td:first-child { text-align: left; }
+    table.data thead th { position: sticky; top: 0; background: var(--card2); color: var(--muted); font-weight: 600; z-index: 1; }
+    table.data tbody tr:hover { background: var(--accent-dim); }
+    .meta-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.6rem; }
+    .meta-item {
+      background: var(--card2); border-radius: 8px; padding: 0.55rem 0.65rem; border: 1px solid var(--border);
+      font-size: 0.86rem;
+    }
+    .meta-item span { display: block; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 0.2rem; }
+    .err { color: var(--neg); font-size: 0.88rem; margin: 0.35rem 0 0; }
+    .note { color: var(--muted); font-size: 0.84rem; margin: 0.5rem 0 0; }
+    code { font-size: 0.82em; background: var(--bg2); padding: 0.1em 0.35em; border-radius: 4px; }
+    footer.foot { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.8rem; }
+    .skeleton { animation: pulse 1.2s ease-in-out infinite; opacity: 0.55; }
+    @keyframes pulse { 50% { opacity: 0.35; } }
+    .rating-badge {
+      display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 0.15rem 0.45rem; border-radius: 4px;
+      background: var(--accent-dim); color: var(--accent);
+    }
+    .rating-badge.sb { background: rgba(61, 220, 151, 0.15); color: var(--pos); }
+    .rating-badge.buy { background: var(--accent-dim); color: var(--accent); }
+    .rating-badge.hold { background: var(--spy-dim); color: var(--spy); }
+    .rating-badge.sell, .rating-badge.ss { background: rgba(255, 107, 107, 0.12); color: var(--neg); }
+    @media (prefers-reduced-motion: reduce) {
+      .skeleton { animation: none; opacity: 1; }
+      html { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="top">
+      <div class="brand">
+        <h1>Trading bench</h1>
+        <p>Portfolio vs SPY buy-and-hold (from <code>portfolio_stats.csv</code>), ML model info, Finviz watchlist ratings, and Alpaca positions.</p>
+      </div>
+      <div class="toolbar">
+        <button type="button" class="btn" id="btnRefresh" title="Reload all data">↻ Refresh</button>
+        <button type="button" class="btn" id="btnTheme" title="Toggle light/dark">◐ Theme</button>
+      </div>
+      <div class="status-row" id="statusPills" style="width:100%; flex-basis:100%;"></div>
+    </header>
+
+    <nav class="jump" aria-label="Sections">
+      <a href="#benchmark">Benchmark</a>
+      <a href="#watchlist">Watchlist ML</a>
+      <a href="#model">Model</a>
+      <a href="#positions">Positions</a>
+    </nav>
+
+    <section class="panel" id="benchmark">
+      <h2>Benchmark</h2>
+      <div class="kpis" id="kpiRow">
+        <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
+        <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
+        <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
+        <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart" aria-label="Portfolio vs SPY chart"></canvas></div>
+      <p id="chartNote" class="note"></p>
+      <h2 style="margin-top:1rem;">Run log</h2>
+      <div class="table-scroll"><table class="data" id="statsTable" aria-label="Historical stats rows"><thead></thead><tbody></tbody></table></div>
+    </section>
+
+    <section class="panel" id="watchlist">
+      <h2>Watchlist ML (<code>WATCHLIST_TICKERS</code> via rating API)</h2>
+      <p id="watchlistNote" class="note">Loading ratings…</p>
+      <div class="table-scroll" id="watchlistScroll" style="display:none;">
+        <table class="data" id="watchlistTable" aria-label="Watchlist ratings"><thead></thead><tbody></tbody></table>
+      </div>
+      <p id="watchlistErr" class="err" style="display:none;"></p>
+    </section>
+
+    <section class="panel" id="model">
+      <h2>Model metadata</h2>
+      <div id="modelMeta" class="meta-grid"></div>
+      <p id="modelErr" class="err"></p>
+    </section>
+
+    <section class="panel" id="positions">
+      <h2>Alpaca positions</h2>
+      <div id="posWrap"></div>
+    </section>
+
+    <footer class="foot">
+      <span id="footMeta"></span> · Figures refresh when you click Refresh. No paths or keys are sent to the browser.
+    </footer>
+  </div>
+
+  <script>
+    const THEME_KEY = "trading-dashboard-theme";
+
+    function fmtUsd(n) {
+      if (n == null || !Number.isFinite(Number(n))) return "—";
+      return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(Number(n));
+    }
+    function fmtPct(n) {
+      if (n == null || !Number.isFinite(Number(n))) return "—";
+      return (100 * Number(n)).toFixed(2) + "%";
+    }
+    function ratingClass(label) {
+      const s = String(label || "").toLowerCase();
+      if (s.includes("strong buy")) return "sb";
+      if (s.includes("strong sell")) return "ss";
+      if (s.includes("buy")) return "buy";
+      if (s.includes("sell")) return "sell";
+      if (s.includes("hold")) return "hold";
+      return "";
+    }
+
+    function initTheme() {
+      const saved = localStorage.getItem(THEME_KEY);
+      const prefers = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", saved || prefers);
+    }
+    function toggleTheme() {
+      const cur = document.documentElement.getAttribute("data-theme") || "dark";
+      const next = cur === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem(THEME_KEY, next);
+      if (window._benchChart) window._benchChart.destroy();
+      window._benchChart = null;
+    }
+
+    function setPills({ healthOk, statsState, sourceFile, alpaca }) {
+      const el = document.getElementById("statusPills");
+      const pills = [];
+      const statsLabels = {
+        ok: ["Stats OK", "ok"],
+        missing: ["No portfolio_stats.csv", "warn"],
+        empty: ["CSV empty (header only?)", "warn"],
+      };
+      const [sl, sc] = statsLabels[statsState] || statsLabels.empty;
+      pills.push(`<span class="pill ${sc}">${sl}</span>`);
+      pills.push(`<span class="pill ${healthOk ? "ok" : "err"}">Rating API ${healthOk ? "reachable" : "down"}</span>`);
+      if (alpaca === "ok") pills.push(`<span class="pill ok">Alpaca OK</span>`);
+      else if (alpaca === "err") pills.push(`<span class="pill err">Alpaca error</span>`);
+      else pills.push(`<span class="pill warn">Alpaca not configured</span>`);
+      if (sourceFile) pills.push(`<span class="pill">${escapeHtml(sourceFile)}</span>`);
+      el.innerHTML = pills.join("");
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function renderKpis(rows) {
+      const el = document.getElementById("kpiRow");
+      if (!rows.length) {
+        el.innerHTML = '<div class="kpi"><span>Latest</span><strong>—</strong><small>No runs yet</small></div>';
+        return;
+      }
+      const last = rows[rows.length - 1];
+      const pv = last.total_portfolio_value;
+      const spy = last.spy_equivalent_value;
+      const delta = pv - spy;
+      const deltaPct = spy > 0 ? ((pv / spy) - 1) * 100 : NaN;
+      el.innerHTML = `
+        <div class="kpi"><span>Portfolio (last)</span><strong>${fmtUsd(pv)}</strong><small>${escapeHtml(String(last.timestamp_utc).slice(0, 19))}Z</small></div>
+        <div class="kpi"><span>SPY equivalent</span><strong>${fmtUsd(spy)}</strong><small>Buy &amp; hold benchmark</small></div>
+        <div class="kpi"><span>Δ vs SPY ($)</span><strong style="color:${delta >= 0 ? "var(--pos)" : "var(--neg)"}">${fmtUsd(delta)}</strong><small>portfolio − benchmark</small></div>
+        <div class="kpi"><span>Δ vs SPY (%)</span><strong style="color:${deltaPct >= 0 ? "var(--pos)" : "var(--neg)"}">${Number.isFinite(deltaPct) ? deltaPct.toFixed(2) + "%" : "—"}</strong><small>${rows.length} run(s) logged</small></div>`;
+    }
+
+    function renderStatsTable(rows) {
+      const thead = document.querySelector("#statsTable thead");
+      const tbody = document.querySelector("#statsTable tbody");
+      thead.innerHTML = "<tr><th>Timestamp (UTC)</th><th>Portfolio</th><th>SPY eq.</th><th>Δ $</th><th>Δ %</th></tr>";
+      tbody.innerHTML = "";
+      const rev = rows.slice().reverse().slice(0, 80);
+      for (const r of rev) {
+        const d = r.total_portfolio_value - r.spy_equivalent_value;
+        const dp = r.spy_equivalent_value > 0 ? ((r.total_portfolio_value / r.spy_equivalent_value) - 1) * 100 : NaN;
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${escapeHtml(r.timestamp_utc)}</td><td>${fmtUsd(r.total_portfolio_value)}</td><td>${fmtUsd(r.spy_equivalent_value)}</td>
+          <td style="color:${d >= 0 ? "var(--pos)" : "var(--neg)"}">${fmtUsd(d)}</td>
+          <td style="color:${dp >= 0 ? "var(--pos)" : "var(--neg)"}">${Number.isFinite(dp) ? dp.toFixed(2) + "%" : "—"}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function renderWatchlist(data, errEl, noteEl, scrollEl) {
+      errEl.style.display = "none";
+      scrollEl.style.display = "none";
+      noteEl.textContent = "";
+      if (data.error && !data.data) {
+        errEl.textContent = data.message || data.error || "Could not load ratings.";
+        errEl.style.display = "block";
+        noteEl.textContent = "Is the rating engine running? Check RATING_ENGINE_URL in .env.";
+        return;
+      }
+      const rows = data.data || [];
+      const errs = data.errors || [];
+      const period = data.period || "";
+      noteEl.textContent = `Period ${period} · ${data.summary ? data.summary.ok + " ok" : rows.length} · ${data.summary ? data.summary.errors + " errors" : errs.length}`;
+      if (!rows.length && !errs.length) {
+        noteEl.textContent += " — no rows returned.";
+        return;
+      }
+      scrollEl.style.display = "block";
+      const thead = document.querySelector("#watchlistTable thead");
+      const tbody = document.querySelector("#watchlistTable tbody");
+      thead.innerHTML = "<tr><th>Symbol</th><th>Score</th><th>Rating</th></tr>";
+      tbody.innerHTML = "";
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        const rc = ratingClass(r.rating);
+        tr.innerHTML = `<td><strong>${escapeHtml(r.ticker)}</strong></td><td>${r.score != null ? escapeHtml(String(r.score)) : "—"}</td>
+          <td><span class="rating-badge ${rc}">${escapeHtml(r.rating || "—")}</span></td>`;
+        tbody.appendChild(tr);
+      }
+      for (const e of errs) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${escapeHtml(e.ticker)}</td><td colspan="2" class="err">${escapeHtml(e.error || "")}</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function load() {
+      initTheme();
+      const chartNote = document.getElementById("chartNote");
+      const modelErr = document.getElementById("modelErr");
+      const watchErr = document.getElementById("watchlistErr");
+      const watchNote = document.getElementById("watchlistNote");
+      const watchScroll = document.getElementById("watchlistScroll");
+      modelErr.textContent = "";
+      watchErr.textContent = "";
+
+      const [hRes, statsRes, modelRes, posRes] = await Promise.all([
+        fetch("/api/engine-health"),
+        fetch("/api/stats"),
+        fetch("/api/model"),
+        fetch("/api/positions"),
+      ]);
+      const health = await hRes.json().catch(() => ({}));
+      const stats = await statsRes.json().catch(() => ({ rows: [] }));
+      const model = await modelRes.json().catch(() => ({}));
+      const positions = await posRes.json().catch(() => ({ enabled: false }));
+
+      const healthOk = hRes.ok && health.status === "ok";
+      const rows = stats.rows || [];
+      let statsState = "empty";
+      if (stats.note === "stats_file_missing") statsState = "missing";
+      else if (rows.length > 0) statsState = "ok";
+      let alpaca = "off";
+      if (positions.enabled) alpaca = positions.error ? "err" : "ok";
+      setPills({ healthOk, statsState, sourceFile: stats.source_file, alpaca });
+
+      renderKpis(rows);
+      renderStatsTable(rows);
+
+      chartNote.textContent = rows.length === 0
+        ? (stats.note === "stats_file_missing"
+          ? "No stats file yet — run main.py once to append portfolio_stats.csv."
+          : "No rows in stats CSV.")
+        : `${rows.length} run(s) logged`;
+
+      const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#4d9fff";
+      const spyC = getComputedStyle(document.documentElement).getPropertyValue("--spy").trim() || "#ffb020";
+      const labels = rows.map((r) => r.timestamp_utc.slice(0, 10));
+      const portfolio = rows.map((r) => r.total_portfolio_value);
+      const spyEq = rows.map((r) => r.spy_equivalent_value);
+      const ctx = document.getElementById("chart").getContext("2d");
+      if (window._benchChart) window._benchChart.destroy();
+      if (rows.length > 0) {
+        window._benchChart = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels,
+            datasets: [
+              { label: "Portfolio", data: portfolio, borderColor: accent, tension: 0.2, fill: false, borderWidth: 2 },
+              { label: "SPY equivalent", data: spyEq, borderColor: spyC, tension: 0.2, fill: false, borderWidth: 2 },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            plugins: {
+              legend: { position: "bottom", labels: { color: getComputedStyle(document.documentElement).getPropertyValue("--muted").trim() } },
+              tooltip: {
+                callbacks: {
+                  label(c) { return c.dataset.label + ": " + fmtUsd(c.parsed.y); },
+                },
+              },
+            },
+            scales: {
+              x: { ticks: { color: getComputedStyle(document.documentElement).getPropertyValue("--muted").trim(), maxRotation: 45 } },
+              y: {
+                ticks: {
+                  color: getComputedStyle(document.documentElement).getPropertyValue("--muted").trim(),
+                  callback(v) {
+                    if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+                    if (v >= 1e3) return (v / 1e3).toFixed(0) + "k";
+                    return v;
+                  },
+                },
+                grid: { color: "rgba(127,127,127,0.12)" },
+              },
+            },
+          },
+        });
+      }
+
+      const metaEl = document.getElementById("modelMeta");
+      metaEl.innerHTML = "";
+      if (model.error && !model.trained_at) {
+        let msg = model.message || model.error || "Could not load model metadata.";
+        if (String(msg).toLowerCase().includes("fetch") || String(msg).toLowerCase().includes("abort")) {
+          msg = "Model service unreachable.";
+        }
+        modelErr.textContent = msg;
+      } else {
+        const inf = model.inference || {};
+        const items = [
+          ["Trained at (UTC)", model.trained_at],
+          ["Feature pipeline", model.feature_pipeline],
+          ["Precision floor", inf.probability_floor],
+          ["Tune min precision", inf.tune_min_precision],
+          ["Classifier", model.classifier],
+          ["Training period", model.period],
+        ];
+        for (const [k, v] of items) {
+          if (v === undefined || v === null || v === "") continue;
+          const d = document.createElement("div");
+          d.className = "meta-item";
+          d.innerHTML = "<span>" + escapeHtml(k) + "</span>" + escapeHtml(typeof v === "object" ? JSON.stringify(v) : String(v));
+          metaEl.appendChild(d);
+        }
+      }
+
+      const wrap = document.getElementById("posWrap");
+      if (!positions.enabled) {
+        wrap.innerHTML = "<p class=\"note\">" + escapeHtml(positions.note || "Alpaca keys not configured.") + "</p>";
+      } else if (positions.error) {
+        wrap.innerHTML = "<p class=\"err\">" + escapeHtml(positions.error) + "</p>";
+      } else if (!positions.positions || positions.positions.length === 0) {
+        wrap.innerHTML = "<p class=\"note\">No open positions · paper: " + escapeHtml(String(positions.paper)) + "</p>";
+      } else {
+        const hdr = "<tr><th>Symbol</th><th>Qty</th><th>Avg entry</th><th>Last</th><th>Market value</th><th>Unrealized P/L</th><th>Unrealized P/L %</th></tr>";
+        const body = positions.positions.map((p) => "<tr><td><strong>" + escapeHtml(p.symbol) + "</strong></td><td>" + escapeHtml(String(p.qty)) + "</td><td>" +
+          fmtUsd(p.avg_entry_price) + "</td><td>" + fmtUsd(p.current_price) + "</td><td>" + fmtUsd(p.market_value) + "</td><td style=\"color:" +
+          (Number(p.unrealized_pl) >= 0 ? "var(--pos)" : "var(--neg)") + "\">" + fmtUsd(p.unrealized_pl) + "</td><td>" + fmtPct(p.unrealized_plpc) + "</td></tr>").join("");
+        wrap.innerHTML = "<p class=\"note\">Paper account: <strong>" + escapeHtml(String(positions.paper)) + "</strong></p><div class=\"table-scroll\"><table class=\"data\"><thead>" + hdr + "</thead><tbody>" + body + "</tbody></table></div>";
+      }
+
+      watchNote.textContent = "Loading watchlist ratings (may take up to a minute)…";
+      let ratings = {};
+      try {
+        const rRat = await fetch("/api/ratings?period=2y&details=0");
+        ratings = await rRat.json().catch(() => ({}));
+        if (!rRat.ok) ratings = { error: true, message: ratings.message || ratings.error || rRat.statusText };
+      } catch (e) {
+        ratings = { error: true, message: String(e) };
+      }
+      renderWatchlist(ratings, watchErr, watchNote, watchScroll);
+
+      document.getElementById("footMeta").textContent = "Last loaded " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC";
+    }
+
+    document.getElementById("btnRefresh").addEventListener("click", () => { load().catch((e) => { document.getElementById("modelErr").textContent = String(e); }); });
+    document.getElementById("btnTheme").addEventListener("click", () => { toggleTheme(); load().catch(() => {}); });
+    initTheme();
+    load().catch((e) => { document.getElementById("modelErr").textContent = String(e); });
+  </script>
+</body>
+</html>
