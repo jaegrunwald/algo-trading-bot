@@ -56,13 +56,13 @@ def _adjusted_probability(p_pos: float, meta: dict[str, Any]) -> tuple[float, fl
 
 def _score_to_rating(score: float) -> str:
     s = int(round(score))
-    if s >= 75:
+    if s >= 70:
         return "Strong Buy"
-    if s >= 55:
+    if s >= 58:
         return "Buy"
     if s >= 40:
         return "Hold"
-    if s >= 25:
+    if s >= 30:
         return "Sell"
     return "Strong Sell"
 

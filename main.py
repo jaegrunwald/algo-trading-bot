@@ -932,9 +932,23 @@ def main() -> None:
         action="store_true",
         help="DEBUG logging (per-ticker progress is already INFO by default).",
     )
+    p.add_argument(
+        "--loop-minutes",
+        type=float,
+        default=0.0,
+        metavar="N",
+        help=(
+            "If N > 0, repeat the trading pass every N minutes until stopped (Ctrl+C). "
+            "Each pass is independent (Finviz + ML + orders + stats append). Default 0: run once."
+        ),
+    )
     args = p.parse_args()
     _configure_logging(args.verbose)
-    try:
+    if args.loop_minutes < 0:
+        raise SystemExit("--loop-minutes must be >= 0")
+    interval_sec = float(args.loop_minutes) * 60.0
+
+    def _one_pass() -> None:
         run(
             dry_run=args.dry_run,
             stats_csv=args.stats_csv,
@@ -942,9 +956,32 @@ def main() -> None:
             ml_period=args.ml_period,
             force_buy=args.force_buy,
         )
-    except Exception:
-        logger.exception("Run failed")
-        sys.exit(1)
+
+    if interval_sec <= 0:
+        try:
+            _one_pass()
+        except Exception:
+            logger.exception("Run failed")
+            sys.exit(1)
+        return
+
+    logger.info(
+        "Loop mode: repeating every %.1f minutes (Ctrl+C to stop)",
+        args.loop_minutes,
+    )
+    while True:
+        try:
+            _one_pass()
+        except KeyboardInterrupt:
+            logger.info("Interrupted — exiting")
+            raise SystemExit(0) from None
+        except Exception:
+            logger.exception("Run failed — sleeping before retry")
+        try:
+            time.sleep(interval_sec)
+        except KeyboardInterrupt:
+            logger.info("Interrupted during sleep — exiting")
+            raise SystemExit(0) from None
 
 
 if __name__ == "__main__":
