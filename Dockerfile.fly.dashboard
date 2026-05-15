@@ -1,0 +1,10 @@
+# Fly build context = repo root (where fly.toml lives). Copies dashboard assets explicitly.
+FROM node:20-alpine
+WORKDIR /app
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm ci --omit=dev
+COPY dashboard/server.js ./
+COPY dashboard/public ./public
+ENV NODE_ENV=production
+EXPOSE 3000
+CMD ["node", "server.js"]
