@@ -5,6 +5,8 @@ COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci --omit=dev
 COPY dashboard/server.js ./
 COPY dashboard/public ./public
+# Default STATS_PATH is path.join(__dirname, "..", "portfolio_stats.csv") → /portfolio_stats.csv in this image.
+COPY portfolio_stats.csv /portfolio_stats.csv
 ENV NODE_ENV=production
 EXPOSE 3000
 CMD ["node", "server.js"]

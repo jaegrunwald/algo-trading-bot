@@ -13,9 +13,10 @@ primary_region = "iad"
 [http_service]
   internal_port = 5000
   force_https = true
-  auto_stop_machines = true
+  # Dashboard calls this over .internal — keep a Machine running so fetches do not hit a stopped service.
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ["app"]
 
 [[http_service.checks]]
@@ -26,6 +27,7 @@ primary_region = "iad"
   path = "/health"
 
 [[vm]]
-  memory = "512mb"
+  # sklearn + joblib can spike RAM at cold start; avoid OOM restart loops.
+  memory = "1024mb"
   cpu_kind = "shared"
   cpus = 1

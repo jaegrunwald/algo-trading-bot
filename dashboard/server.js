@@ -3,6 +3,7 @@
  * Repo map: ../ARCHITECTURE.md
  */
 import dotenv from "dotenv";
+import dns from "node:dns";
 import express from "express";
 import { existsSync } from "fs";
 import fs from "fs/promises";
@@ -13,6 +14,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Same file as main.py — never `.env.example` (that file is documentation only). */
 const REPO_DOTENV_PATH = path.resolve(__dirname, "..", ".env");
 dotenv.config({ path: REPO_DOTENV_PATH, override: true });
+
+// Fly `.internal` is often IPv6-first; Node's default dns reorder can break outbound fetch from the dashboard.
+if (typeof dns.setDefaultResultOrder === "function") {
+  dns.setDefaultResultOrder("verbatim");
+}
 
 function dashboardListenPort() {
   const raw = (process.env.DASHBOARD_PORT || "").trim();
@@ -35,10 +41,36 @@ const app = express();
 const PORT = dashboardListenPort();
 const defaultStats = path.join(__dirname, "..", "portfolio_stats.csv");
 const STATS_PATH = process.env.PORTFOLIO_STATS_PATH || defaultStats;
-const RATING_ENGINE_URL = (process.env.RATING_ENGINE_URL || "http://127.0.0.1:5001").replace(
-  /\/$/,
-  ""
-);
+
+/** On Fly, defaulting to localhost never reaches a separate rating app — require the secret. */
+function ratingEngineBaseUrl() {
+  const raw = (process.env.RATING_ENGINE_URL || "").trim().replace(/\/$/, "");
+  if (raw) return raw;
+  if (process.env.FLY_APP_NAME) {
+    console.warn(
+      "RATING_ENGINE_URL is unset. Set: fly secrets set RATING_ENGINE_URL=http://<rating-app>.internal:5000 -a this-app"
+    );
+    return "";
+  }
+  return "http://127.0.0.1:5001";
+}
+
+const RATING_ENGINE_URL = ratingEngineBaseUrl();
+
+function logRatingFetchFailure(label, url, err) {
+  let host = "?";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    /* ignore */
+  }
+  const msg = err && typeof err === "object" && "message" in err ? String(err.message) : String(err);
+  console.warn(`[rating] ${label} host=${host} err=${msg}`);
+}
+
+if (!existsSync(STATS_PATH)) {
+  console.warn(`STATS_PATH not found (${STATS_PATH}); /api/stats will be empty until file exists or PORTFOLIO_STATS_PATH is set.`);
+}
 
 /** Match main.py: APCA_* preferred, ALPACA_* accepted. */
 function alpacaCredentials() {
@@ -120,8 +152,6 @@ function publicRatingsPayload(body) {
   };
 }
 
-app.use(express.static(path.join(__dirname, "public")));
-
 app.get("/api/stats", async (_req, res) => {
   try {
     const raw = await fs.readFile(STATS_PATH, "utf8");
@@ -141,6 +171,12 @@ app.get("/api/stats", async (_req, res) => {
 });
 
 app.get("/api/model", async (_req, res) => {
+  if (!RATING_ENGINE_URL) {
+    return res.status(503).json({
+      error: "rating_engine_not_configured",
+      message: "Set Fly secret RATING_ENGINE_URL=http://<rating-app>.internal:5000",
+    });
+  }
   const url = `${RATING_ENGINE_URL}/api/model`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 12000);
@@ -157,6 +193,7 @@ app.get("/api/model", async (_req, res) => {
     return res.json(publicModelPayload(body));
   } catch (e) {
     clearTimeout(t);
+    logRatingFetchFailure("model", url, e);
     return res.status(503).json({
       error: "rating_engine_unreachable",
       message: "Model service unavailable.",
@@ -166,6 +203,12 @@ app.get("/api/model", async (_req, res) => {
 
 /** Lightweight reachability check for the dashboard header. */
 app.get("/api/engine-health", async (_req, res) => {
+  if (!RATING_ENGINE_URL) {
+    return res.status(503).json({
+      error: "rating_engine_not_configured",
+      message: "Set Fly secret RATING_ENGINE_URL=http://<rating-app>.internal:5000",
+    });
+  }
   const url = `${RATING_ENGINE_URL}/health`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 8000);
@@ -179,6 +222,7 @@ app.get("/api/engine-health", async (_req, res) => {
     return res.json({ status: "down" });
   } catch (e) {
     clearTimeout(t);
+    logRatingFetchFailure("health", url, e);
     return res.status(503).json({
       error: "rating_engine_unreachable",
       message: "Model service unavailable.",
@@ -186,8 +230,39 @@ app.get("/api/engine-health", async (_req, res) => {
   }
 });
 
+/** Parse-only: verify Fly secret shape (no secrets leaked). */
+app.get("/api/rating-debug", (_req, res) => {
+  const raw = (process.env.RATING_ENGINE_URL || "").trim();
+  if (!raw) {
+    return res.json({
+      env_RATING_ENGINE_URL: false,
+      resolved_base: RATING_ENGINE_URL || null,
+      on_fly: Boolean(process.env.FLY_APP_NAME),
+    });
+  }
+  try {
+    const u = new URL(raw.replace(/\/$/, ""));
+    return res.json({
+      env_RATING_ENGINE_URL: true,
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === "https:" ? "443" : "80"),
+      hint:
+        "Prefer http://<rating-app>.internal:5000 on Fly. If you still get rating_engine_unreachable, try https://<rating-app>.fly.dev (public edge; dashboard still calls it server-side).",
+    });
+  } catch {
+    return res.json({ env_RATING_ENGINE_URL: true, parse_error: true });
+  }
+});
+
 /** Proxy watchlist ML ratings (can be slow — many tickers × yfinance). */
 app.get("/api/ratings", async (req, res) => {
+  if (!RATING_ENGINE_URL) {
+    return res.status(503).json({
+      error: "rating_engine_not_configured",
+      message: "Set Fly secret RATING_ENGINE_URL=http://<rating-app>.internal:5000",
+    });
+  }
   const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
   const url = `${RATING_ENGINE_URL}/api/ratings${qs}`;
   const ctrl = new AbortController();
@@ -205,6 +280,7 @@ app.get("/api/ratings", async (req, res) => {
     return res.json(publicRatingsPayload(body));
   } catch (e) {
     clearTimeout(t);
+    logRatingFetchFailure("ratings", url, e);
     return res.status(503).json({
       error: "rating_engine_unreachable",
       message: "Ratings service unavailable.",
@@ -264,6 +340,16 @@ app.get("/api/positions", async (_req, res) => {
     });
   }
 });
+
+const publicDir = path.join(__dirname, "public");
+
+app.get("/", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
+app.get("/benchmark", (_req, res) => res.sendFile(path.join(publicDir, "benchmark.html")));
+app.get("/watchlist", (_req, res) => res.sendFile(path.join(publicDir, "watchlist.html")));
+app.get("/model", (_req, res) => res.sendFile(path.join(publicDir, "model.html")));
+app.get("/positions", (_req, res) => res.sendFile(path.join(publicDir, "positions.html")));
+
+app.use(express.static(publicDir));
 
 app.listen(PORT, dashboardListenHost(), () => {
   const { key, secret } = alpacaCredentials();
