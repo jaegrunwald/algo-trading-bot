@@ -37,10 +37,13 @@ function dashboardListenHost() {
 }
 
 const app = express();
+app.use(express.json({ limit: "32kb" }));
 /** Flask uses `PORT` in .env (e.g. 5001). Dashboard must not steal it — use DASHBOARD_PORT only. */
 const PORT = dashboardListenPort();
 const defaultStats = path.join(__dirname, "..", "portfolio_stats.csv");
 const STATS_PATH = process.env.PORTFOLIO_STATS_PATH || defaultStats;
+/** Baked into Fly image at build time; used to seed a writable volume copy. */
+const STATS_SEED_PATH = process.env.PORTFOLIO_STATS_SEED_PATH || "/portfolio_stats.csv";
 
 /** On Fly, defaulting to localhost never reaches a separate rating app — require the secret. */
 function ratingEngineBaseUrl() {
@@ -85,6 +88,18 @@ function alpacaCredentials() {
     ""
   ).trim();
   return { key, secret };
+}
+
+async function seedStatsFileIfNeeded() {
+  if (existsSync(STATS_PATH)) return;
+  if (!existsSync(STATS_SEED_PATH) || STATS_SEED_PATH === STATS_PATH) return;
+  try {
+    await fs.mkdir(path.dirname(STATS_PATH), { recursive: true });
+    await fs.copyFile(STATS_SEED_PATH, STATS_PATH);
+    console.log(`Seeded stats from ${STATS_SEED_PATH} → ${STATS_PATH}`);
+  } catch (e) {
+    console.warn(`Could not seed stats file: ${e.message || e}`);
+  }
 }
 
 function parseStatsCsv(text) {
@@ -152,11 +167,23 @@ function publicRatingsPayload(body) {
   };
 }
 
+function noStore(res) {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+}
+
 app.get("/api/stats", async (_req, res) => {
+  noStore(res);
   try {
     const raw = await fs.readFile(STATS_PATH, "utf8");
     const rows = parseStatsCsv(raw);
-    res.json({ row_count: rows.length, rows, source_file: statsSourceLabel() });
+    let updated_at = null;
+    try {
+      const st = await fs.stat(STATS_PATH);
+      updated_at = st.mtime.toISOString();
+    } catch {
+      /* ignore */
+    }
+    res.json({ row_count: rows.length, rows, source_file: statsSourceLabel(), updated_at });
   } catch (e) {
     if (e && e.code === "ENOENT") {
       return res.json({
@@ -167,6 +194,51 @@ app.get("/api/stats", async (_req, res) => {
       });
     }
     res.status(500).json({ error: "stats_unavailable" });
+  }
+});
+
+/** Append one run row (for local `main.py` → Fly dashboard). Requires DASHBOARD_STATS_TOKEN on the server. */
+app.post("/api/stats/append", async (req, res) => {
+  noStore(res);
+  const expected = (process.env.DASHBOARD_STATS_TOKEN || "").trim();
+  if (!expected) {
+    return res.status(503).json({
+      error: "stats_push_disabled",
+      message: "Set DASHBOARD_STATS_TOKEN on the dashboard server.",
+    });
+  }
+  const got = String(req.headers["x-stats-token"] || "").trim();
+  if (got !== expected) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const ts = String(body.timestamp_utc || "").trim();
+  const pv = Number(body.total_portfolio_value);
+  const spy = Number(body.spy_equivalent_value);
+  if (!ts || !Number.isFinite(pv) || !Number.isFinite(spy)) {
+    return res.status(400).json({
+      error: "invalid_body",
+      message: "Need timestamp_utc, total_portfolio_value, spy_equivalent_value.",
+    });
+  }
+  try {
+    await seedStatsFileIfNeeded();
+    const newFile = !existsSync(STATS_PATH);
+    const line = `${ts},${pv.toFixed(2)},${spy.toFixed(2)}\n`;
+    if (newFile) {
+      await fs.writeFile(
+        STATS_PATH,
+        "timestamp_utc,total_portfolio_value,spy_equivalent_value\n" + line,
+        "utf8"
+      );
+    } else {
+      await fs.appendFile(STATS_PATH, line, "utf8");
+    }
+    const rows = parseStatsCsv(await fs.readFile(STATS_PATH, "utf8"));
+    return res.json({ ok: true, row_count: rows.length, source_file: statsSourceLabel() });
+  } catch (e) {
+    console.warn("[stats] append failed:", e.message || e);
+    return res.status(500).json({ error: "stats_append_failed" });
   }
 });
 
@@ -351,10 +423,16 @@ app.get("/positions", (_req, res) => res.sendFile(path.join(publicDir, "position
 
 app.use(express.static(publicDir));
 
+await seedStatsFileIfNeeded();
+
 app.listen(PORT, dashboardListenHost(), () => {
   const { key, secret } = alpacaCredentials();
   const host = dashboardListenHost();
   console.log(`Dashboard listening on ${host}:${PORT}`);
+  console.log(`  Stats file: ${STATS_PATH}`);
+  if ((process.env.DASHBOARD_STATS_TOKEN || "").trim()) {
+    console.log("  Stats push: POST /api/stats/append (X-Stats-Token)");
+  }
   console.log(`  → http://localhost:${PORT}/`);
   console.log(`  → http://127.0.0.1:${PORT}/`);
   console.log(

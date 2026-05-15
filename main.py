@@ -13,6 +13,8 @@ import json
 import logging
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -638,18 +640,71 @@ def append_portfolio_stats(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     new_file = not path.is_file()
+    ts = datetime.now(timezone.utc).isoformat()
     with path.open("a", newline="") as f:
         w = csv.writer(f)
         if new_file:
             w.writerow(["timestamp_utc", "total_portfolio_value", "spy_equivalent_value"])
         w.writerow(
             [
-                datetime.now(timezone.utc).isoformat(),
+                ts,
                 f"{total_portfolio_value:.2f}",
                 f"{spy_equivalent:.2f}",
             ]
         )
     logger.info("Appended stats to %s", path)
+    maybe_push_stats_to_dashboard(
+        timestamp_utc=ts,
+        total_portfolio_value=total_portfolio_value,
+        spy_equivalent=spy_equivalent,
+    )
+
+
+def maybe_push_stats_to_dashboard(
+    *,
+    timestamp_utc: str,
+    total_portfolio_value: float,
+    spy_equivalent: float,
+) -> None:
+    """
+    Optional: POST the new row to a remote dashboard (e.g. Fly) when
+    DASHBOARD_STATS_PUSH_URL and DASHBOARD_STATS_TOKEN are set in .env.
+    """
+    url = os.environ.get("DASHBOARD_STATS_PUSH_URL", "").strip()
+    token = os.environ.get("DASHBOARD_STATS_TOKEN", "").strip()
+    if not url:
+        return
+    if not token:
+        logger.warning(
+            "DASHBOARD_STATS_PUSH_URL is set but DASHBOARD_STATS_TOKEN is missing; skip remote stats push"
+        )
+        return
+    payload = json.dumps(
+        {
+            "timestamp_utc": timestamp_utc,
+            "total_portfolio_value": total_portfolio_value,
+            "spy_equivalent_value": spy_equivalent,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Stats-Token": token,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status >= 400:
+                logger.warning("Dashboard stats push HTTP %s", resp.status)
+            else:
+                logger.info("Pushed stats row to dashboard (%s)", url)
+    except urllib.error.HTTPError as e:
+        logger.warning("Dashboard stats push failed: HTTP %s %s", e.code, e.reason)
+    except OSError as e:
+        logger.warning("Dashboard stats push failed: %s", e)
 
 
 def run(
@@ -687,6 +742,10 @@ def run(
             logger.warning("Empty Finviz watchlist.")
         else:
             logger.info("Watchlist size=%d", len(tickers))
+            logger.info(
+                "Watchlist head: %s",
+                ", ".join(tickers[: min(25, len(tickers))]),
+            )
             logger.info("--- watchlist ML pass (%d tickers) ---", len(tickers))
         n_wl = len(tickers)
         for i, sym_raw in enumerate(tickers, start=1):
@@ -783,6 +842,10 @@ def run(
         logger.warning("Empty Finviz watchlist; skipping entries.")
     else:
         logger.info("Watchlist size=%d", len(tickers))
+        logger.info(
+            "Watchlist head: %s",
+            ", ".join(tickers[: min(25, len(tickers))]),
+        )
         logger.info("--- watchlist ML pass (%d tickers) ---", len(tickers))
         n_wl = len(tickers)
         for i, sym_raw in enumerate(tickers, start=1):

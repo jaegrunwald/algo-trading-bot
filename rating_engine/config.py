@@ -1,4 +1,4 @@
-"""Small env helpers for the Flask app (not the Finviz-driven list in ``main.py``)."""
+"""Env helpers for the Flask app. Optional ``FINVIZ_PREPEND_WATCHLIST_TICKERS`` merges ``WATCHLIST_TICKERS`` into ``scripts/scanner.py`` for ``main.py``."""
 
 import os
 

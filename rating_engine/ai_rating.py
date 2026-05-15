@@ -58,9 +58,9 @@ def _score_to_rating(score: float) -> str:
     s = int(round(score))
     if s >= 70:
         return "Strong Buy"
-    if s >= 58:
+    if s >= 57:
         return "Buy"
-    if s >= 40:
+    if s >= 45:
         return "Hold"
     if s >= 30:
         return "Sell"

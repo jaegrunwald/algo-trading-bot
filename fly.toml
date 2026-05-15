@@ -46,7 +46,13 @@ primary_region = "iad"
 #   DASHBOARD_LISTEN_HOST = "0.0.0.0"
 #   PORTFOLIO_STATS_PATH = "/data/portfolio_stats.csv"
 #
-# Persistent CSV: fly volumes create data --region iad --size 1
+# Local main.py → live Fly benchmark: set secret (required for POST /api/stats/append):
+#   fly secrets set DASHBOARD_STATS_TOKEN=<long-random> -a algo-trading-bot
+# In repo .env: DASHBOARD_STATS_PUSH_URL=https://algo-trading-bot.fly.dev/api/stats/append
+#               DASHBOARD_STATS_TOKEN=<same>
+#
+# Persistent CSV across redeploys (volume region must match machine region):
+#   fly volumes create data --region sjc --size 1 -a algo-trading-bot
 # [[mounts]]
 #   source = "data"
 #   destination = "/data"

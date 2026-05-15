@@ -11,6 +11,25 @@ function fmtPct(n) {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   return (100 * Number(n)).toFixed(2) + "%";
 }
+/** X-axis label from ISO timestamp (UTC, hour bucket). */
+function fmtChartAxisTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso).slice(0, 16);
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  return `${mm}-${dd} ${hh}:00`;
+}
+function fmtChartTooltipTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const y = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mi = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${y}-${mm}-${dd} ${hh}:${mi} UTC`;
+}
 function ratingClass(label) {
   const s = String(label || "").toLowerCase();
   if (s.includes("strong buy")) return "sb";
@@ -127,7 +146,8 @@ function renderChart(rows) {
   if (rows.length === 0 || typeof Chart === "undefined") return;
   const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#4d9fff";
   const spyC = getComputedStyle(document.documentElement).getPropertyValue("--spy").trim() || "#ffb020";
-  const labels = rows.map((r) => r.timestamp_utc.slice(0, 10));
+  const labels = rows.map((r) => fmtChartAxisTime(r.timestamp_utc));
+  const timestamps = rows.map((r) => r.timestamp_utc);
   const portfolio = rows.map((r) => r.total_portfolio_value);
   const spyEq = rows.map((r) => r.spy_equivalent_value);
   window._benchChart = new Chart(ctx, {
@@ -150,6 +170,10 @@ function renderChart(rows) {
         },
         tooltip: {
           callbacks: {
+            title(items) {
+              const i = items[0] && items[0].dataIndex;
+              return i != null && timestamps[i] ? fmtChartTooltipTime(timestamps[i]) : "";
+            },
             label(c) {
               return c.dataset.label + ": " + fmtUsd(c.parsed.y);
             },
@@ -157,7 +181,14 @@ function renderChart(rows) {
         },
       },
       scales: {
-        x: { ticks: { color: getComputedStyle(document.documentElement).getPropertyValue("--muted").trim(), maxRotation: 45 } },
+        x: {
+          ticks: {
+            color: getComputedStyle(document.documentElement).getPropertyValue("--muted").trim(),
+            maxRotation: 45,
+            autoSkip: true,
+            maxTicksLimit: 14,
+          },
+        },
         y: {
           ticks: {
             color: getComputedStyle(document.documentElement).getPropertyValue("--muted").trim(),
@@ -293,10 +324,25 @@ function renderPositions(positions) {
   }
 }
 
+function statsFetchUrl() {
+  return `/api/stats?_=${Date.now()}`;
+}
+
+let _autoRefreshTimer = null;
+const BENCHMARK_AUTO_REFRESH_MS = 60_000;
+
+function startAutoRefresh() {
+  if (_autoRefreshTimer) clearInterval(_autoRefreshTimer);
+  if (PAGE !== "benchmark" && PAGE !== "home") return;
+  _autoRefreshTimer = setInterval(() => {
+    loadCurrentPage().catch(() => {});
+  }, BENCHMARK_AUTO_REFRESH_MS);
+}
+
 async function loadStatusPills() {
   const [hRes, statsRes, posRes] = await Promise.all([
     fetch("/api/engine-health"),
-    fetch("/api/stats"),
+    fetch(statsFetchUrl()),
     fetch("/api/positions"),
   ]);
   const health = await hRes.json().catch(() => ({}));
@@ -329,7 +375,12 @@ async function loadBenchmark() {
   renderStatsTable(rows);
   renderChart(rows);
   const foot = document.getElementById("footMeta");
-  if (foot) foot.textContent = "Last loaded " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC";
+  if (foot) {
+    const src = stats.updated_at ? ` · CSV mtime ${String(stats.updated_at).slice(0, 19)}Z` : "";
+    foot.textContent =
+      "Last loaded " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC" + src;
+  }
+  startAutoRefresh();
 }
 
 async function loadWatchlistPage() {
@@ -410,7 +461,9 @@ function wireChrome() {
 }
 
 wireChrome();
-loadCurrentPage().catch((e) => {
+loadCurrentPage()
+  .then(() => startAutoRefresh())
+  .catch((e) => {
   const el =
     document.getElementById("pageErr") ||
     document.getElementById("modelErr") ||
