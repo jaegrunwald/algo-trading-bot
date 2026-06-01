@@ -15,3 +15,5 @@ build/
 models/*.joblib
 dashboard/node_modules/
 .spy_last_good_close.json
+.pending_orders.json
+.pending_orders.json.tmp

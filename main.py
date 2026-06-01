@@ -69,6 +69,7 @@ MAX_CONCURRENT_POSITIONS = int(os.environ.get("MAX_CONCURRENT_POSITIONS", "20"))
 MIN_NOTIONAL_USD = 1.0
 BASELINE_SPY_PATH = ROOT / ".portfolio_spy_baseline.json"
 SPY_LAST_GOOD_PATH = ROOT / ".spy_last_good_close.json"
+PENDING_ORDERS_PATH = ROOT / ".pending_orders.json"
 DEFAULT_STATS_CSV = ROOT / "portfolio_stats.csv"
 FILL_POLL_SEC = 2.0
 FILL_POLL_ATTEMPTS = 15
@@ -436,6 +437,93 @@ def ensure_all_longs_have_trailing_stops(
             logger.error("Failed protective exit order for %s: %s", sym, e)
 
 
+def _load_pending_orders() -> list[dict]:
+    try:
+        if not PENDING_ORDERS_PATH.is_file():
+            return []
+        return json.loads(PENDING_ORDERS_PATH.read_text())
+    except Exception as e:
+        logger.warning("Could not read pending orders log: %s", e)
+        return []
+
+
+def _save_pending_orders(orders: list[dict]) -> None:
+    """Atomic write via temp-file rename to avoid corrupt state on crash."""
+    try:
+        tmp = PENDING_ORDERS_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(orders, indent=2))
+        tmp.replace(PENDING_ORDERS_PATH)
+    except OSError as e:
+        logger.warning("Could not save pending orders log: %s", e)
+
+
+def _append_pending_order(symbol: str, order_id: str, notional: float) -> None:
+    orders = _load_pending_orders()
+    orders.append({
+        "symbol": symbol,
+        "order_id": order_id,
+        "notional": notional,
+        "submitted_at_utc": datetime.now(timezone.utc).isoformat(),
+    })
+    _save_pending_orders(orders)
+
+
+def _remove_pending_order(order_id: str) -> None:
+    orders = [o for o in _load_pending_orders() if o.get("order_id") != order_id]
+    _save_pending_orders(orders)
+
+
+def reconcile_pending_orders(client: TradingClient) -> set[str]:
+    """
+    At startup: check each logged pending order against Alpaca.
+
+    Returns symbols with still-open (in-flight) orders so the ML loop skips re-buying them.
+    Filled and terminal-failed orders are removed from the log.
+    """
+    orders = _load_pending_orders()
+    if not orders:
+        return set()
+
+    still_open: set[str] = set()
+    to_remove: list[str] = []
+
+    for entry in orders:
+        oid = entry.get("order_id", "")
+        sym = entry.get("symbol", "?")
+        if not oid:
+            continue
+        try:
+            od = client.get_order_by_id(oid)
+            st = _order_status_value(getattr(od, "status", None))
+            fq = _filled_qty_from_order(od)
+            if fq > 0 or st == "filled":
+                logger.info(
+                    "Order recovery: %s order %s was filled (qty=%.6f) — position should be present",
+                    sym, oid, fq,
+                )
+                to_remove.append(oid)
+            elif _order_terminal_failed(od):
+                logger.warning(
+                    "Order recovery: %s order %s ended in status=%s — was not filled",
+                    sym, oid, st,
+                )
+                to_remove.append(oid)
+            else:
+                logger.warning(
+                    "Order recovery: %s order %s still in status=%s — skipping re-buy this run",
+                    sym, oid, st,
+                )
+                still_open.add(sym)
+                to_remove.append(oid)
+        except Exception as e:
+            logger.warning("Order recovery: could not fetch order %s for %s: %s", oid, sym, e)
+            still_open.add(sym)
+
+    remaining = [o for o in orders if o.get("order_id") not in to_remove]
+    _save_pending_orders(remaining)
+    return still_open
+
+
 def try_force_buy_entry(
     client: TradingClient,
     symbol: str | None,
@@ -520,8 +608,9 @@ def submit_strong_buy_entry(
         return True, 0.0
 
     placed = client.submit_order(order_data=mkt)
-    oid = getattr(placed, "id", placed)
+    oid = str(getattr(placed, "id", placed))
     logger.info("Submitted market BUY %s notional=%.2f DAY order_id=%s", symbol, notional_usd, oid)
+    _append_pending_order(symbol, oid, notional_usd)
 
     for _ in range(FILL_POLL_ATTEMPTS):
         time.sleep(FILL_POLL_SEC)
@@ -537,17 +626,21 @@ def submit_strong_buy_entry(
                 symbol,
                 _order_status_value(getattr(od, "status", None)),
             )
+            _remove_pending_order(oid)
             return False, 0.0
         fq = _filled_qty_from_order(od)
         if fq > 0:
             logger.info("Buy fill %s: filled_qty=%.6f status=%s", symbol, fq, _order_status_value(od.status))
+            _remove_pending_order(oid)
             return True, fq
 
     pos_qty = _position_map(client).get(symbol, 0.0)
     if pos_qty > 0:
         logger.info("Using position qty=%.6f for %s (order poll did not report fill yet)", pos_qty, symbol)
+        _remove_pending_order(oid)
         return True, pos_qty
     logger.warning("Buy for %s: no filled_qty and no position after wait; check Alpaca console.", symbol)
+    # Order remains in pending log — reconcile_pending_orders will resolve it on next startup.
     return False, 0.0
 
 
@@ -894,6 +987,8 @@ def run(
         )
         return
 
+    pending_skip = reconcile_pending_orders(client)
+
     account = client.get_account()
     logger.info(
         "Account equity=%.2f portfolio_value=%.2f paper=%s max_concurrent_positions=%d",
@@ -938,6 +1033,9 @@ def run(
                 positions = _position_map(client)
                 if sym in positions and positions[sym] > 0:
                     logger.info("%s | already long — skip", _wl(i, n_wl, sym))
+                    continue
+                if sym in pending_skip:
+                    logger.info("%s | pending open order from prior run — skip", _wl(i, n_wl, sym))
                     continue
                 if _long_position_count(positions) >= MAX_CONCURRENT_POSITIONS:
                     logger.info(
