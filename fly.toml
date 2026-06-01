@@ -1,58 +1,31 @@
-# Node dashboard — separate Fly app from the rating API (fly.rating.toml).
+# fly.toml app configuration file generated for algo-trading-bot on 2026-06-01T20:33:41Z
 #
-# Deploy:
-#   fly apps create algo-trading-bot    # once; or reuse your existing app name
-#   fly deploy
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-# Point the dashboard at the rating app (same Fly org, http + .internal, port 5000):
-#   fly secrets set RATING_ENGINE_URL=http://algo-trading-rating.internal:5000 -a algo-trading-bot
-# If the dashboard still shows "rating_engine_unreachable", Node may not resolve .internal well —
-# use the public edge URL instead (still server-side only from the dashboard):
-#   fly secrets set RATING_ENGINE_URL=https://algo-trading-rating.fly.dev -a algo-trading-bot
-# Replace app names if yours differ. Redeploy dashboard after changing secrets.
-#
-# Alpaca (optional UI): fly secrets set APCA_API_KEY_ID=... APCA_API_SECRET_KEY=... ALPACA_PAPER=true
-app = "algo-trading-bot"
-# Match fly.rating.toml primary_region so dashboard ↔ rating traffic stays local.
-primary_region = "iad"
+
+app = 'algo-trading-bot'
+primary_region = 'ams'
 
 [build]
-  dockerfile = "Dockerfile.fly.dashboard"
+  dockerfile = 'Dockerfile.fly.dashboard'
 
 [http_service]
-  internal_port = 3000
+  internal_port = 8080
   force_https = true
-  # Keep the dashboard reachable (avoid STATUS=suspended / NXDOMAIN when nothing is running).
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
+  processes = ['app']
 
-[[http_service.checks]]
-  interval = "30s"
-  timeout = "5s"
-  grace_period = "45s"
-  method = "get"
-  path = "/"
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '45s'
+    method = 'get'
+    path = '/'
 
 [[vm]]
-  memory = "512mb"
-  cpu_kind = "shared"
+  memory = '512mb'
+  cpu_kind = 'shared'
   cpus = 1
-
-# Optional non-secrets:
-# [env]
-#   DASHBOARD_PORT = "3000"
-#   DASHBOARD_LISTEN_HOST = "0.0.0.0"
-#   PORTFOLIO_STATS_PATH = "/data/portfolio_stats.csv"
-#
-# Local main.py → live Fly benchmark: set secret (required for POST /api/stats/append):
-#   fly secrets set DASHBOARD_STATS_TOKEN=<long-random> -a algo-trading-bot
-# In repo .env: DASHBOARD_STATS_PUSH_URL=https://algo-trading-bot.fly.dev/api/stats/append
-#               DASHBOARD_STATS_TOKEN=<same>
-#
-# Persistent CSV across redeploys (volume region must match machine region):
-#   fly volumes create data --region sjc --size 1 -a algo-trading-bot
-# [[mounts]]
-#   source = "data"
-#   destination = "/data"
+  memory_mb = 256
