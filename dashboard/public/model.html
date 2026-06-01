@@ -21,24 +21,28 @@
       <p id="pageErr" class="err" style="display: none; width: 100%; flex-basis: 100%; margin-top: 0.5rem;"></p>
     </header>
 
-    <nav class="site-nav" aria-label="Main">
-      <a href="/">Home</a>
-      <a href="/benchmark">Benchmark</a>
-      <a href="/watchlist">Watchlist ML</a>
-      <a href="/model">Model</a>
-      <a href="/positions">Positions</a>
-      <a href="/scheduler">Scheduler</a>
-    </nav>
+    <div class="layout">
+      <nav class="site-nav" aria-label="Main">
+        <a href="/">Home</a>
+        <a href="/benchmark">Benchmark</a>
+        <a href="/watchlist">Watchlist ML</a>
+        <a href="/model">Model</a>
+        <a href="/positions">Positions</a>
+        <a href="/scheduler">Scheduler</a>
+      </nav>
 
-    <section class="panel" id="model">
-      <h2>Model</h2>
-      <div id="modelMeta" class="meta-grid"></div>
-      <p id="modelErr" class="err"></p>
-    </section>
+      <main class="content">
+        <section class="panel" id="model">
+          <h2>Model</h2>
+          <div id="modelMeta" class="meta-grid"></div>
+          <p id="modelErr" class="err"></p>
+        </section>
 
-    <footer class="foot">
-      <span id="footMeta"></span>
-    </footer>
+        <footer class="foot">
+          <span id="footMeta"></span>
+        </footer>
+      </main>
+    </div>
   </div>
   <script src="/dashboard.js"></script>
 </body>

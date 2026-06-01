@@ -21,102 +21,106 @@
       <p id="pageErr" class="err" style="display: none; width: 100%; flex-basis: 100%; margin-top: 0.5rem;"></p>
     </header>
 
-    <nav class="site-nav" aria-label="Main">
-      <a href="/">Home</a>
-      <a href="/benchmark">Benchmark</a>
-      <a href="/watchlist">Watchlist ML</a>
-      <a href="/model">Model</a>
-      <a href="/positions">Positions</a>
-      <a href="/scheduler">Scheduler</a>
-    </nav>
+    <div class="layout">
+      <nav class="site-nav" aria-label="Main">
+        <a href="/">Home</a>
+        <a href="/benchmark">Benchmark</a>
+        <a href="/watchlist">Watchlist ML</a>
+        <a href="/model">Model</a>
+        <a href="/positions">Positions</a>
+        <a href="/scheduler">Scheduler</a>
+      </nav>
 
-    <section class="panel">
-      <h2>Bot status</h2>
-      <div class="sched-status">
-        <span class="pill idle" id="schedRunning">Idle</span>
-        <span class="pill" id="schedEnabled" style="display:none">Auto-run on</span>
-      </div>
-      <div class="sched-meta">
-        <div id="schedLastRun">Last run: —</div>
-        <div id="schedNextRun">Next run: —</div>
-      </div>
-      <div class="sched-actions">
-        <button type="button" class="btn btn-primary" id="btnRunNow">▶ Run Now</button>
-        <button type="button" class="btn btn-danger" id="btnStop" disabled>◼ Stop</button>
-      </div>
-    </section>
+      <main class="content">
+        <section class="panel">
+          <h2>Bot status</h2>
+          <div class="sched-status">
+            <span class="pill idle" id="schedRunning">Idle</span>
+            <span class="pill" id="schedEnabled" style="display:none">Auto-run on</span>
+          </div>
+          <div class="sched-meta">
+            <div id="schedLastRun">Last run: —</div>
+            <div id="schedNextRun">Next run: —</div>
+          </div>
+          <div class="sched-actions">
+            <button type="button" class="btn btn-primary" id="btnRunNow">▶ Run Now</button>
+            <button type="button" class="btn btn-danger" id="btnStop" disabled>◼ Stop</button>
+          </div>
+        </section>
 
-    <section class="panel">
-      <h2>Schedule settings</h2>
-      <div class="sched-grid">
-        <div>
-          <div class="form-row">
-            <label for="cfgEnabled">Auto-run</label>
-            <div class="check-row">
-              <input type="checkbox" id="cfgEnabled" />
-              <span>Enable scheduled runs</span>
+        <section class="panel">
+          <h2>Schedule settings</h2>
+          <div class="sched-grid">
+            <div>
+              <div class="form-row">
+                <label for="cfgEnabled">Auto-run</label>
+                <div class="check-row">
+                  <input type="checkbox" id="cfgEnabled" />
+                  <span>Enable scheduled runs</span>
+                </div>
+              </div>
+
+              <div class="form-row">
+                <label for="cfgInterval">Interval</label>
+                <select id="cfgInterval">
+                  <option value="15">Every 15 minutes</option>
+                  <option value="30">Every 30 minutes</option>
+                  <option value="60" selected>Every 1 hour</option>
+                  <option value="120">Every 2 hours</option>
+                  <option value="240">Every 4 hours</option>
+                  <option value="480">Every 8 hours</option>
+                  <option value="custom">Custom…</option>
+                </select>
+              </div>
+
+              <div class="form-row" id="customIntervalRow" style="display:none">
+                <label for="cfgCustomInterval">Custom interval (minutes)</label>
+                <input type="number" id="cfgCustomInterval" min="1" max="1440" value="60" />
+              </div>
+
+              <div class="form-row">
+                <label>Trading hours window (local time)</label>
+                <div class="row-inline">
+                  <input type="number" id="cfgHoursStart" min="0" max="23" value="9" style="width:5rem" />
+                  <span style="color:var(--muted);font-size:.85rem">:00 to</span>
+                  <input type="number" id="cfgHoursEnd" min="0" max="23" value="16" style="width:5rem" />
+                  <span style="color:var(--muted);font-size:.85rem">:00</span>
+                </div>
+                <span class="note" style="margin-top:.25rem">Runs outside this window are skipped.</span>
+              </div>
+
+              <div class="form-row">
+                <label for="cfgWatchlistLimit">Watchlist limit</label>
+                <input type="number" id="cfgWatchlistLimit" min="1" max="200" value="50" style="width:6rem" />
+              </div>
+
+              <div class="form-row">
+                <label>Mode</label>
+                <div class="check-row">
+                  <input type="checkbox" id="cfgDryRun" />
+                  <span>Dry-run (no real orders)</span>
+                </div>
+              </div>
+
+              <div class="sched-actions" style="margin-top:1rem">
+                <button type="button" class="btn btn-primary" id="btnSaveConfig">Save settings</button>
+              </div>
+            </div>
+
+            <div>
+              <h2 style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 .6rem">Live log</h2>
+              <div class="trace-panel" id="tracePanel">
+                <span class="trace-empty">No activity yet — run the bot or wait for the next scheduled run.</span>
+              </div>
             </div>
           </div>
+        </section>
 
-          <div class="form-row">
-            <label for="cfgInterval">Interval</label>
-            <select id="cfgInterval">
-              <option value="15">Every 15 minutes</option>
-              <option value="30">Every 30 minutes</option>
-              <option value="60" selected>Every 1 hour</option>
-              <option value="120">Every 2 hours</option>
-              <option value="240">Every 4 hours</option>
-              <option value="480">Every 8 hours</option>
-              <option value="custom">Custom…</option>
-            </select>
-          </div>
-
-          <div class="form-row" id="customIntervalRow" style="display:none">
-            <label for="cfgCustomInterval">Custom interval (minutes)</label>
-            <input type="number" id="cfgCustomInterval" min="1" max="1440" value="60" />
-          </div>
-
-          <div class="form-row">
-            <label>Trading hours window (local time)</label>
-            <div class="row-inline">
-              <input type="number" id="cfgHoursStart" min="0" max="23" value="9" style="width:5rem" />
-              <span style="color:var(--muted);font-size:.85rem">:00 to</span>
-              <input type="number" id="cfgHoursEnd" min="0" max="23" value="16" style="width:5rem" />
-              <span style="color:var(--muted);font-size:.85rem">:00</span>
-            </div>
-            <span class="note" style="margin-top:.25rem">Runs outside this window are skipped.</span>
-          </div>
-
-          <div class="form-row">
-            <label for="cfgWatchlistLimit">Watchlist limit</label>
-            <input type="number" id="cfgWatchlistLimit" min="1" max="200" value="50" style="width:6rem" />
-          </div>
-
-          <div class="form-row">
-            <label>Mode</label>
-            <div class="check-row">
-              <input type="checkbox" id="cfgDryRun" />
-              <span>Dry-run (no real orders)</span>
-            </div>
-          </div>
-
-          <div class="sched-actions" style="margin-top:1rem">
-            <button type="button" class="btn btn-primary" id="btnSaveConfig">Save settings</button>
-          </div>
-        </div>
-
-        <div>
-          <h2 style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 .6rem">Live log</h2>
-          <div class="trace-panel" id="tracePanel">
-            <span class="trace-empty">No activity yet — run the bot or wait for the next scheduled run.</span>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <footer class="foot">
-      <span id="footMeta"></span>
-    </footer>
+        <footer class="foot">
+          <span id="footMeta"></span>
+        </footer>
+      </main>
+    </div>
   </div>
   <script src="/dashboard.js"></script>
 </body>

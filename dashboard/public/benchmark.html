@@ -22,32 +22,36 @@
       <p id="pageErr" class="err" style="display: none; width: 100%; flex-basis: 100%; margin-top: 0.5rem;"></p>
     </header>
 
-    <nav class="site-nav" aria-label="Main">
-      <a href="/">Home</a>
-      <a href="/benchmark">Benchmark</a>
-      <a href="/watchlist">Watchlist ML</a>
-      <a href="/model">Model</a>
-      <a href="/positions">Positions</a>
-      <a href="/scheduler">Scheduler</a>
-    </nav>
+    <div class="layout">
+      <nav class="site-nav" aria-label="Main">
+        <a href="/">Home</a>
+        <a href="/benchmark">Benchmark</a>
+        <a href="/watchlist">Watchlist ML</a>
+        <a href="/model">Model</a>
+        <a href="/positions">Positions</a>
+        <a href="/scheduler">Scheduler</a>
+      </nav>
 
-    <section class="panel" id="benchmark">
-      <h2>Summary</h2>
-      <div class="kpis" id="kpiRow">
-        <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
-        <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
-        <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
-        <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
-      </div>
-      <div class="chart-wrap"><canvas id="chart" aria-label="Portfolio vs SPY chart"></canvas></div>
-      <p id="chartNote" class="note"></p>
-      <h2 style="margin-top: 1rem;">Run log</h2>
-      <div class="table-scroll"><table class="data" id="statsTable" aria-label="Historical stats"><thead></thead><tbody></tbody></table></div>
-    </section>
+      <main class="content">
+        <section class="panel" id="benchmark">
+          <h2>Summary</h2>
+          <div class="kpis" id="kpiRow">
+            <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
+            <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
+            <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
+            <div class="kpi skeleton"><span>—</span><strong>—</strong></div>
+          </div>
+          <div class="chart-wrap"><canvas id="chart" aria-label="Portfolio vs SPY chart"></canvas></div>
+          <p id="chartNote" class="note"></p>
+          <h2 style="margin-top: 1rem;">Run log</h2>
+          <div class="table-scroll"><table class="data" id="statsTable" aria-label="Historical stats"><thead></thead><tbody></tbody></table></div>
+        </section>
 
-    <footer class="foot">
-      <span id="footMeta"></span> · Auto-refresh every 60s on this page, or click Refresh.
-    </footer>
+        <footer class="foot">
+          <span id="footMeta"></span> · Auto-refresh every 60s on this page, or click Refresh.
+        </footer>
+      </main>
+    </div>
   </div>
   <script src="/dashboard.js"></script>
 </body>
