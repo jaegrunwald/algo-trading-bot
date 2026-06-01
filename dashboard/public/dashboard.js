@@ -11,24 +11,49 @@ function fmtPct(n) {
   if (n == null || !Number.isFinite(Number(n))) return "—";
   return (100 * Number(n)).toFixed(2) + "%";
 }
-/** X-axis label from ISO timestamp (UTC, hour bucket). */
+/** Browser local timezone (e.g. America/Los_Angeles). CSV rows are still stored as UTC on the server. */
+function localTimeZoneName() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+  } catch {
+    return "local";
+  }
+}
+
+function fmtLocalDateTime(iso, { withSeconds = false } = {}) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const opts = {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  };
+  if (withSeconds) opts.second = "2-digit";
+  return new Intl.DateTimeFormat(undefined, opts).format(d);
+}
+
+function fmtFootLoaded(extra = "") {
+  return (
+    `Last loaded ${fmtLocalDateTime(new Date().toISOString(), { withSeconds: true })} (${localTimeZoneName()})` +
+    extra
+  );
+}
+
+/** X-axis label from ISO timestamp (local hour bucket). */
 function fmtChartAxisTime(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso).slice(0, 16);
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
   return `${mm}-${dd} ${hh}:00`;
 }
+
 function fmtChartTooltipTime(iso) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  const y = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const hh = String(d.getUTCHours()).padStart(2, "0");
-  const mi = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${y}-${mm}-${dd} ${hh}:${mi} UTC`;
+  return `${fmtLocalDateTime(iso, { withSeconds: true })} (${localTimeZoneName()})`;
 }
 function ratingClass(label) {
   const s = String(label || "").toLowerCase();
@@ -104,7 +129,7 @@ function renderKpis(rows) {
   const delta = pv - spy;
   const deltaPct = spy > 0 ? (pv / spy - 1) * 100 : NaN;
   el.innerHTML = `
-        <div class="kpi"><span>Portfolio (last)</span><strong>${fmtUsd(pv)}</strong><small>${escapeHtml(String(last.timestamp_utc).slice(0, 19))}Z</small></div>
+        <div class="kpi"><span>Portfolio (last)</span><strong>${fmtUsd(pv)}</strong><small>${escapeHtml(fmtLocalDateTime(last.timestamp_utc, { withSeconds: true }))}</small></div>
         <div class="kpi"><span>SPY equivalent</span><strong>${fmtUsd(spy)}</strong><small>Buy &amp; hold benchmark</small></div>
         <div class="kpi"><span>Δ vs SPY ($)</span><strong style="color:${delta >= 0 ? "var(--pos)" : "var(--neg)"}">${fmtUsd(delta)}</strong><small>portfolio − benchmark</small></div>
         <div class="kpi"><span>Δ vs SPY (%)</span><strong style="color:${deltaPct >= 0 ? "var(--pos)" : "var(--neg)"}">${Number.isFinite(deltaPct) ? deltaPct.toFixed(2) + "%" : "—"}</strong><small>${rows.length} run(s) logged</small></div>`;
@@ -114,14 +139,14 @@ function renderStatsTable(rows) {
   const thead = document.querySelector("#statsTable thead");
   const tbody = document.querySelector("#statsTable tbody");
   if (!thead || !tbody) return;
-  thead.innerHTML = "<tr><th>Timestamp (UTC)</th><th>Portfolio</th><th>SPY eq.</th><th>Δ $</th><th>Δ %</th></tr>";
+  thead.innerHTML = `<tr><th>Time (${escapeHtml(localTimeZoneName())})</th><th>Portfolio</th><th>SPY eq.</th><th>Δ $</th><th>Δ %</th></tr>`;
   tbody.innerHTML = "";
   const rev = rows.slice().reverse().slice(0, 80);
   for (const r of rev) {
     const d = r.total_portfolio_value - r.spy_equivalent_value;
     const dp = r.spy_equivalent_value > 0 ? (r.total_portfolio_value / r.spy_equivalent_value - 1) * 100 : NaN;
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${escapeHtml(r.timestamp_utc)}</td><td>${fmtUsd(r.total_portfolio_value)}</td><td>${fmtUsd(r.spy_equivalent_value)}</td>
+    tr.innerHTML = `<td>${escapeHtml(fmtLocalDateTime(r.timestamp_utc, { withSeconds: true }))}</td><td>${fmtUsd(r.total_portfolio_value)}</td><td>${fmtUsd(r.spy_equivalent_value)}</td>
           <td style="color:${d >= 0 ? "var(--pos)" : "var(--neg)"}">${fmtUsd(d)}</td>
           <td style="color:${dp >= 0 ? "var(--pos)" : "var(--neg)"}">${Number.isFinite(dp) ? dp.toFixed(2) + "%" : "—"}</td>`;
     tbody.appendChild(tr);
@@ -261,7 +286,7 @@ function renderModel(model) {
   }
   const inf = model.inference || {};
   const items = [
-    ["Trained at (UTC)", model.trained_at],
+    [`Trained at (${localTimeZoneName()})`, model.trained_at ? fmtLocalDateTime(model.trained_at, { withSeconds: true }) : model.trained_at],
     ["Feature pipeline", model.feature_pipeline],
     ["Precision floor", inf.probability_floor],
     ["Tune min precision", inf.tune_min_precision],
@@ -364,7 +389,7 @@ async function loadStatusPills() {
 async function loadHome() {
   await loadStatusPills();
   const foot = document.getElementById("footMeta");
-  if (foot) foot.textContent = "Last loaded " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC";
+  if (foot) foot.textContent = fmtFootLoaded();
 }
 
 async function loadBenchmark() {
@@ -376,9 +401,10 @@ async function loadBenchmark() {
   renderChart(rows);
   const foot = document.getElementById("footMeta");
   if (foot) {
-    const src = stats.updated_at ? ` · CSV mtime ${String(stats.updated_at).slice(0, 19)}Z` : "";
-    foot.textContent =
-      "Last loaded " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC" + src;
+    const src = stats.updated_at
+      ? ` · file updated ${fmtLocalDateTime(stats.updated_at, { withSeconds: true })}`
+      : "";
+    foot.textContent = fmtFootLoaded(src);
   }
   startAutoRefresh();
 }
@@ -399,7 +425,7 @@ async function loadWatchlistPage() {
   }
   if (watchErr && watchNote && watchScroll) renderWatchlist(ratings, watchErr, watchNote, watchScroll);
   const foot = document.getElementById("footMeta");
-  if (foot) foot.textContent = "Last loaded " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC";
+  if (foot) foot.textContent = fmtFootLoaded();
 }
 
 async function loadModelPage() {
@@ -408,7 +434,7 @@ async function loadModelPage() {
   const model = await modelRes.json().catch(() => ({}));
   renderModel(model);
   const foot = document.getElementById("footMeta");
-  if (foot) foot.textContent = "Last loaded " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC";
+  if (foot) foot.textContent = fmtFootLoaded();
 }
 
 async function loadPositionsPage() {
@@ -417,7 +443,7 @@ async function loadPositionsPage() {
   const positions = await posRes.json().catch(() => ({ enabled: false }));
   renderPositions(positions);
   const foot = document.getElementById("footMeta");
-  if (foot) foot.textContent = "Last loaded " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC";
+  if (foot) foot.textContent = fmtFootLoaded();
 }
 
 async function loadCurrentPage() {

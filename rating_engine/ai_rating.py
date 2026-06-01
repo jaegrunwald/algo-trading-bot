@@ -10,16 +10,9 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from rating_engine.features import (
-    FEATURE_COLUMNS as LEGACY_FEATURE_COLUMNS,
-    FEATURE_SPEC_VERSION,
-    MIN_ROWS_FOR_FEATURES,
-    compute_feature_frame,
-    forward_return,
-)
 from rating_engine.market_data import fetch_daily_history
 from rating_engine.training_features import (
-    FEATURE_COLUMNS as TA_FEATURE_COLUMNS,
+    FEATURE_COLUMNS,
     FEATURE_PIPELINE_ID,
     MIN_ROWS_TA_PIPELINE,
     fetch_regime_features,
@@ -72,10 +65,6 @@ def _model_path() -> Path:
     return Path(raw).expanduser().resolve()
 
 
-def _is_ta_pipeline(meta: dict[str, Any]) -> bool:
-    return meta.get("feature_pipeline") == FEATURE_PIPELINE_ID
-
-
 def load_artifact() -> dict[str, Any]:
     """Load joblib once; artifact must be a dict with keys 'model', 'feature_columns'."""
     global _ARTIFACT
@@ -92,21 +81,15 @@ def load_artifact() -> dict[str, Any]:
     meta = data.get("meta") or {}
     cols = list(data["feature_columns"])
 
-    if _is_ta_pipeline(meta):
-        if cols != TA_FEATURE_COLUMNS:
-            raise ValueError(
-                f"TA pipeline feature_columns mismatch code. Expected {TA_FEATURE_COLUMNS}, got {cols}."
-            )
-    else:
-        if cols != LEGACY_FEATURE_COLUMNS:
-            raise ValueError(
-                f"Legacy model feature_columns mismatch. Expected {LEGACY_FEATURE_COLUMNS}, got {cols}."
-            )
-        v = meta.get("feature_spec_version")
-        if v is not None and int(v) != FEATURE_SPEC_VERSION:
-            raise ValueError(
-                f"feature_spec_version mismatch (artifact {v}, code {FEATURE_SPEC_VERSION}). Retrain."
-            )
+    if meta.get("feature_pipeline") != FEATURE_PIPELINE_ID:
+        raise ValueError(
+            f"Model was trained with a legacy pipeline (feature_pipeline={meta.get('feature_pipeline')!r}). "
+            "Retrain with: python scripts/train_rating_model.py"
+        )
+    if cols != FEATURE_COLUMNS:
+        raise ValueError(
+            f"TA pipeline feature_columns mismatch. Expected {FEATURE_COLUMNS}, got {cols}."
+        )
     _ARTIFACT = data
     return _ARTIFACT
 
@@ -126,8 +109,8 @@ def predict_from_ohlcv(
     """
     Latest-row prediction: score 0–100 from positive-class probability, plus label.
 
-    TA pipeline needs SPY/XLK regime columns: pass ``regime`` or ``fetch_regime_period``
-    (yfinance window, e.g. same as stock history).
+    Pass ``regime`` (pre-fetched SPY/XLK DataFrame) or ``fetch_regime_period``
+    (yfinance window, e.g. same period string as stock history) to supply regime context.
     """
     art = load_artifact()
     meta = art.get("meta") or {}
@@ -137,27 +120,15 @@ def predict_from_ohlcv(
     if not hasattr(model, "predict_proba"):
         raise TypeError("Model must support predict_proba.")
 
-    if _is_ta_pipeline(meta):
-        if len(ohlcv) < MIN_ROWS_TA_PIPELINE:
-            raise ValueError(
-                f"Need at least {MIN_ROWS_TA_PIPELINE} trading days for TA pipeline; "
-                f"got {len(ohlcv)}. Try ?period=2y or ?period=max."
-            )
-        if regime is None:
-            per = fetch_regime_period or str(meta.get("period") or "2y")
-            regime = fetch_regime_features(period=per)
-        X = latest_feature_row(ohlcv, regime)
-    else:
-        if len(ohlcv) < MIN_ROWS_FOR_FEATURES:
-            raise ValueError(
-                f"Need at least {MIN_ROWS_FOR_FEATURES} trading days for features; "
-                f"got {len(ohlcv)}. Try ?period=2y or ?period=max."
-            )
-        feats = compute_feature_frame(ohlcv)
-        row = feats.iloc[-1][feat_cols]
-        if row.isna().any():
-            raise ValueError("Latest row has NaN features; try a longer history period.")
-        X = row.to_frame().T
+    if len(ohlcv) < MIN_ROWS_TA_PIPELINE:
+        raise ValueError(
+            f"Need at least {MIN_ROWS_TA_PIPELINE} trading days for TA pipeline; "
+            f"got {len(ohlcv)}. Try ?period=2y or ?period=max."
+        )
+    if regime is None:
+        per = fetch_regime_period or str(meta.get("period") or "2y")
+        regime = fetch_regime_features(period=per)
+    X = latest_feature_row(ohlcv, regime)
 
     proba = model.predict_proba(X)[0]
     if proba.shape[0] < 2:
@@ -192,44 +163,10 @@ def rating_for_ticker(
     return out
 
 
-def build_training_table(
-    tickers: list[str],
-    *,
-    period: str = "2y",
-    forward_horizon: int = 10,
-    label_threshold: float = 0.005,
-) -> pd.DataFrame:
-    """
-    Legacy stacked panel (old feature pipeline). Prefer training script + TA pipeline for new work.
-    """
-    frames: list[pd.DataFrame] = []
-    for sym in tickers:
-        sym = sym.strip().upper()
-        if not sym:
-            continue
-        raw = fetch_daily_history(sym, period=period)
-        feats = compute_feature_frame(raw)
-        c = raw["Close"].astype(float)
-        feats["y"] = (forward_return(c, forward_horizon) > label_threshold).astype(float)
-        feats = feats.dropna(subset=LEGACY_FEATURE_COLUMNS + ["y"])
-        feats["ticker"] = sym
-        idx = feats.index
-        if isinstance(idx, pd.DatetimeIndex):
-            feats["as_of"] = idx.normalize()
-        else:
-            feats["as_of"] = pd.to_datetime(idx, utc=False)
-        frames.append(feats[LEGACY_FEATURE_COLUMNS + ["y", "ticker", "as_of"]])
-    if not frames:
-        raise ValueError("No training rows; check tickers and period.")
-    return pd.concat(frames, axis=0)
-
-
 def model_info() -> dict[str, Any]:
     """Metadata from loaded artifact (for GET /api/model)."""
     art = load_artifact()
     meta = dict(art.get("meta") or {})
     meta.setdefault("feature_columns", list(art["feature_columns"]))
-    if not _is_ta_pipeline(meta):
-        meta.setdefault("feature_spec_version", FEATURE_SPEC_VERSION)
     meta["model_path"] = str(_model_path())
     return meta

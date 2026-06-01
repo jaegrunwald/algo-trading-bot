@@ -11,12 +11,14 @@ import argparse
 import csv
 import json
 import logging
+import ssl
 import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -72,6 +74,69 @@ FILL_POLL_SEC = 2.0
 FILL_POLL_ATTEMPTS = 15
 # Pause between yfinance-heavy ML calls to reduce Yahoo throttling (seconds).
 YF_THROTTLE_AFTER_TICKER = float(os.environ.get("YF_THROTTLE_SEC", "1.0"))
+
+
+def _loop_timezone() -> ZoneInfo:
+    """Local system TZ unless LOOP_TIMEZONE is set (e.g. America/Los_Angeles)."""
+    raw = os.environ.get("LOOP_TIMEZONE", "").strip()
+    if raw:
+        return ZoneInfo(raw)
+    return datetime.now().astimezone().tzinfo  # type: ignore[return-value]
+
+
+def _parse_loop_local_hours(raw: str | None) -> tuple[int, int] | None:
+    """
+    Parse inclusive local hour range, e.g. ``6-13`` → 6am through 1pm (hour 13).
+    Returns None if unset.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if "-" not in s:
+        raise ValueError(f"LOOP_LOCAL_HOURS must be START-END (e.g. 6-13), got {s!r}")
+    a, b = s.split("-", 1)
+    start_h = int(a.strip())
+    end_h = int(b.strip())
+    if not (0 <= start_h <= 23 and 0 <= end_h <= 23):
+        raise ValueError("LOOP_LOCAL_HOURS hours must be 0–23")
+    return start_h, end_h
+
+
+def _in_loop_local_hours(now: datetime, hours: tuple[int, int]) -> bool:
+    start_h, end_h = hours
+    h = now.astimezone(_loop_timezone()).hour
+    if start_h <= end_h:
+        return start_h <= h <= end_h
+    # Overnight window (e.g. 22-6)
+    return h >= start_h or h <= end_h
+
+
+def _seconds_until_loop_window_opens(now: datetime, hours: tuple[int, int]) -> float:
+    """Sleep duration until the next local window start (hour ``start_h``, minute 0)."""
+    tz = _loop_timezone()
+    local = now.astimezone(tz)
+    start_h, end_h = hours
+    if _in_loop_local_hours(now, hours):
+        return 0.0
+    target = local.replace(hour=start_h, minute=0, second=0, microsecond=0)
+    if start_h <= end_h:
+        if local.hour > end_h:
+            target += timedelta(days=1)
+        # else local.hour < start_h → target is today (already correct)
+    else:
+        # Overnight: if between end_h+1 and start_h-1, target is today or tomorrow
+        if local.hour > end_h and local.hour < start_h:
+            pass  # target today
+        elif local.hour > end_h:
+            target += timedelta(days=1)
+    if target <= local:
+        target += timedelta(days=1)
+    return max(0.0, (target - local).total_seconds())
+
+
+def _format_loop_hours(hours: tuple[int, int]) -> str:
+    start_h, end_h = hours
+    return f"{start_h:02d}:00–{end_h:02d}:59 local"
 
 
 def _normalize_entry_min_rating(raw: str | None) -> str:
@@ -660,6 +725,16 @@ def append_portfolio_stats(
     )
 
 
+def _https_ssl_context() -> ssl.SSLContext:
+    """CA bundle for urllib HTTPS (macOS Python often lacks system certs until Install Certificates)."""
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def maybe_push_stats_to_dashboard(
     *,
     timestamp_utc: str,
@@ -695,14 +770,21 @@ def maybe_push_stats_to_dashboard(
             "X-Stats-Token": token,
         },
     )
+    ctx = _https_ssl_context() if url.lower().startswith("https://") else None
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
             if resp.status >= 400:
                 logger.warning("Dashboard stats push HTTP %s", resp.status)
             else:
                 logger.info("Pushed stats row to dashboard (%s)", url)
     except urllib.error.HTTPError as e:
         logger.warning("Dashboard stats push failed: HTTP %s %s", e.code, e.reason)
+    except ssl.SSLError as e:
+        logger.warning(
+            "Dashboard stats push failed (SSL): %s — run: pip install certifi "
+            "(or macOS: open the Python Install Certificates.command in your venv)",
+            e,
+        )
     except OSError as e:
         logger.warning("Dashboard stats push failed: %s", e)
 
@@ -1005,11 +1087,28 @@ def main() -> None:
             "Each pass is independent (Finviz + ML + orders + stats append). Default 0: run once."
         ),
     )
+    p.add_argument(
+        "--loop-local-hours",
+        default=os.environ.get("LOOP_LOCAL_HOURS", "").strip() or None,
+        metavar="START-END",
+        help=(
+            "With --loop-minutes: only run during inclusive local hours (0–23), e.g. 6-13 for 6am–1pm. "
+            "Outside the window the process sleeps until the next open. TZ: LOOP_TIMEZONE or system local."
+        ),
+    )
     args = p.parse_args()
     _configure_logging(args.verbose)
     if args.loop_minutes < 0:
         raise SystemExit("--loop-minutes must be >= 0")
     interval_sec = float(args.loop_minutes) * 60.0
+    loop_hours: tuple[int, int] | None = None
+    if args.loop_local_hours:
+        try:
+            loop_hours = _parse_loop_local_hours(args.loop_local_hours)
+        except ValueError as e:
+            raise SystemExit(str(e)) from e
+        if interval_sec <= 0:
+            raise SystemExit("--loop-local-hours requires --loop-minutes > 0")
 
     def _one_pass() -> None:
         run(
@@ -1028,11 +1127,35 @@ def main() -> None:
             sys.exit(1)
         return
 
-    logger.info(
-        "Loop mode: repeating every %.1f minutes (Ctrl+C to stop)",
-        args.loop_minutes,
-    )
+    tz = _loop_timezone()
+    if loop_hours:
+        logger.info(
+            "Loop mode: every %.1f minutes, local window %s (%s, Ctrl+C to stop)",
+            args.loop_minutes,
+            _format_loop_hours(loop_hours),
+            getattr(tz, "key", tz),
+        )
+    else:
+        logger.info(
+            "Loop mode: repeating every %.1f minutes (Ctrl+C to stop)",
+            args.loop_minutes,
+        )
     while True:
+        if loop_hours and not _in_loop_local_hours(datetime.now(timezone.utc), loop_hours):
+            wait = _seconds_until_loop_window_opens(datetime.now(timezone.utc), loop_hours)
+            wake = datetime.now(timezone.utc) + timedelta(seconds=wait)
+            logger.info(
+                "Outside local trading window (%s); sleeping %.0f min until %s",
+                _format_loop_hours(loop_hours),
+                wait / 60.0,
+                wake.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z"),
+            )
+            try:
+                time.sleep(wait)
+            except KeyboardInterrupt:
+                logger.info("Interrupted during sleep — exiting")
+                raise SystemExit(0) from None
+            continue
         try:
             _one_pass()
         except KeyboardInterrupt:
