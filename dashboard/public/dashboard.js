@@ -353,6 +353,182 @@ function statsFetchUrl() {
   return `/api/stats?_=${Date.now()}`;
 }
 
+// ── Scheduler page ─────────────────────────────────────────────────────────────
+
+let _schedulerStream = null;
+let _schedulerPollTimer = null;
+
+function appendTraceLine(line, panel) {
+  const empty = panel.querySelector(".trace-empty");
+  if (empty) empty.remove();
+  const d = document.createElement("div");
+  d.className = "trace-line";
+  const time = new Date(line.time).toLocaleTimeString("en-US", { hour12: false });
+  d.innerHTML =
+    `<span class="trace-time">${escapeHtml(time)}</span>` +
+    `<span class="trace-tag ${escapeHtml(line.tag)}">${escapeHtml(line.tag)}</span>` +
+    `<span class="trace-msg">${escapeHtml(line.msg)}</span>`;
+  panel.appendChild(d);
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function updateSchedulerStatus(data) {
+  const runningEl  = document.getElementById("schedRunning");
+  const enabledPill = document.getElementById("schedEnabled");
+  const lastRunEl  = document.getElementById("schedLastRun");
+  const nextRunEl  = document.getElementById("schedNextRun");
+  const runBtn     = document.getElementById("btnRunNow");
+  const stopBtn    = document.getElementById("btnStop");
+
+  if (runningEl) {
+    runningEl.textContent = data.running ? "Running" : "Idle";
+    runningEl.className   = "pill " + (data.running ? "running" : "idle");
+  }
+  if (enabledPill) {
+    enabledPill.style.display = data.config && data.config.enabled ? "" : "none";
+  }
+  if (lastRunEl) {
+    lastRunEl.textContent = data.lastRunAt
+      ? `Last run: ${fmtLocalDateTime(data.lastRunAt, { withSeconds: true })}`
+      : "Last run: —";
+  }
+  if (nextRunEl) {
+    nextRunEl.textContent = data.nextRunAt
+      ? `Next run: ${fmtLocalDateTime(data.nextRunAt, { withSeconds: true })}`
+      : (data.config && data.config.enabled ? "Next run: —" : "Auto-run disabled");
+  }
+  if (runBtn)  runBtn.disabled  = data.running;
+  if (stopBtn) stopBtn.disabled = !data.running;
+}
+
+async function loadSchedulerPage() {
+  await loadStatusPills();
+
+  const tracePanel   = document.getElementById("tracePanel");
+  const intervalEl   = document.getElementById("cfgInterval");
+  const customIntEl  = document.getElementById("cfgCustomInterval");
+  const customRow    = document.getElementById("customIntervalRow");
+  const enabledEl    = document.getElementById("cfgEnabled");
+  const hoursStartEl = document.getElementById("cfgHoursStart");
+  const hoursEndEl   = document.getElementById("cfgHoursEnd");
+  const dryRunEl     = document.getElementById("cfgDryRun");
+  const wlLimitEl    = document.getElementById("cfgWatchlistLimit");
+
+  let data;
+  try {
+    const r = await fetch("/api/scheduler");
+    data = await r.json();
+  } catch {
+    data = { config: {}, running: false, lastRunAt: null, nextRunAt: null, recentLogs: [] };
+  }
+
+  const cfg = data.config || {};
+  if (enabledEl)    enabledEl.checked  = Boolean(cfg.enabled);
+  if (hoursStartEl) hoursStartEl.value = cfg.hoursStart ?? 9;
+  if (hoursEndEl)   hoursEndEl.value   = cfg.hoursEnd   ?? 16;
+  if (dryRunEl)     dryRunEl.checked   = Boolean(cfg.dryRun);
+  if (wlLimitEl)    wlLimitEl.value    = cfg.watchlistLimit ?? 50;
+
+  const presets = ["15", "30", "60", "120", "240", "480"];
+  const savedInterval = String(cfg.intervalMinutes ?? 60);
+  if (intervalEl && customIntEl && customRow) {
+    if (presets.includes(savedInterval)) {
+      intervalEl.value        = savedInterval;
+      customRow.style.display = "none";
+    } else {
+      intervalEl.value        = "custom";
+      customIntEl.value       = savedInterval;
+      customRow.style.display = "";
+    }
+    intervalEl.addEventListener("change", () => {
+      customRow.style.display = intervalEl.value === "custom" ? "" : "none";
+    });
+  }
+
+  updateSchedulerStatus(data);
+
+  if (tracePanel && data.recentLogs && data.recentLogs.length) {
+    for (const line of data.recentLogs) appendTraceLine(line, tracePanel);
+  }
+
+  if (_schedulerStream) _schedulerStream.close();
+  _schedulerStream = new EventSource("/api/scheduler/stream");
+  _schedulerStream.onmessage = (ev) => {
+    try { if (tracePanel) appendTraceLine(JSON.parse(ev.data), tracePanel); } catch { /* ignore */ }
+  };
+
+  if (_schedulerPollTimer) clearInterval(_schedulerPollTimer);
+  _schedulerPollTimer = setInterval(async () => {
+    try {
+      const r = await fetch("/api/scheduler");
+      updateSchedulerStatus(await r.json());
+    } catch { /* ignore */ }
+  }, 3000);
+
+  window.addEventListener("pagehide", () => {
+    if (_schedulerStream)    _schedulerStream.close();
+    if (_schedulerPollTimer) clearInterval(_schedulerPollTimer);
+  }, { once: true });
+
+  const saveBtn = document.getElementById("btnSaveConfig");
+  if (saveBtn) {
+    saveBtn.addEventListener("click", async () => {
+      const intervalMinutes = intervalEl && intervalEl.value === "custom"
+        ? Number(customIntEl?.value || 60)
+        : Number(intervalEl?.value ?? 60);
+      const payload = {
+        enabled:        enabledEl?.checked        ?? false,
+        intervalMinutes,
+        hoursStart:     Number(hoursStartEl?.value ?? 9),
+        hoursEnd:       Number(hoursEndEl?.value   ?? 16),
+        dryRun:         dryRunEl?.checked          ?? false,
+        watchlistLimit: Number(wlLimitEl?.value    ?? 50),
+      };
+      saveBtn.disabled    = true;
+      saveBtn.textContent = "Saving…";
+      try {
+        const r = await fetch("/api/scheduler/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const d = await r.json();
+        updateSchedulerStatus({ running: data.running, config: d.config, nextRunAt: d.nextRunAt });
+        saveBtn.textContent = "Saved ✓";
+      } catch {
+        saveBtn.textContent = "Error";
+      }
+      setTimeout(() => { saveBtn.textContent = "Save settings"; saveBtn.disabled = false; }, 1800);
+    });
+  }
+
+  const runBtn = document.getElementById("btnRunNow");
+  if (runBtn) {
+    runBtn.addEventListener("click", async () => {
+      runBtn.disabled = true;
+      try {
+        const r = await fetch("/api/scheduler/run-now", { method: "POST" });
+        const d = await r.json();
+        if (!d.ok) runBtn.disabled = false;
+      } catch {
+        runBtn.disabled = false;
+      }
+    });
+  }
+
+  const stopBtn = document.getElementById("btnStop");
+  if (stopBtn) {
+    stopBtn.addEventListener("click", async () => {
+      try { await fetch("/api/scheduler/stop", { method: "POST" }); } catch { /* ignore */ }
+    });
+  }
+
+  const foot = document.getElementById("footMeta");
+  if (foot) foot.textContent = fmtFootLoaded();
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
 let _autoRefreshTimer = null;
 const BENCHMARK_AUTO_REFRESH_MS = 60_000;
 
@@ -453,6 +629,7 @@ async function loadCurrentPage() {
   else if (PAGE === "watchlist") await loadWatchlistPage();
   else if (PAGE === "model") await loadModelPage();
   else if (PAGE === "positions") await loadPositionsPage();
+  else if (PAGE === "scheduler") await loadSchedulerPage();
 }
 
 function wireChrome() {

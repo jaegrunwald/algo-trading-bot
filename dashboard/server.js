@@ -4,6 +4,7 @@
  */
 import dotenv from "dotenv";
 import dns from "node:dns";
+import { spawn } from "child_process";
 import express from "express";
 import { existsSync } from "fs";
 import fs from "fs/promises";
@@ -170,6 +171,212 @@ function publicRatingsPayload(body) {
 function noStore(res) {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate");
 }
+
+// ── Scheduler ────────────────────────────────────────────────────────────────
+
+const SCHEDULER_CONFIG_PATH = path.resolve(__dirname, "..", ".scheduler-config.json");
+const LOG_BUFFER_MAX = 300;
+
+const defaultSchedulerConfig = {
+  enabled: false,
+  intervalMinutes: 60,
+  hoursStart: 9,
+  hoursEnd: 16,
+  dryRun: false,
+  watchlistLimit: 50,
+};
+
+let schedulerConfig = { ...defaultSchedulerConfig };
+let botProcess = null;
+let botRunning = false;
+let lastRunAt = null;
+let lastRunEndAt = null;
+let nextRunAt = null;
+let logBuffer = [];
+const sseClients = new Set();
+
+function pushLog(tag, msg) {
+  const line = { tag, msg, time: new Date().toISOString() };
+  logBuffer.push(line);
+  if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.shift();
+  const data = `data: ${JSON.stringify(line)}\n\n`;
+  for (const res of [...sseClients]) {
+    try { res.write(data); } catch { sseClients.delete(res); }
+  }
+}
+
+async function loadSchedulerConfig() {
+  try {
+    const raw = await fs.readFile(SCHEDULER_CONFIG_PATH, "utf8");
+    schedulerConfig = { ...defaultSchedulerConfig, ...JSON.parse(raw) };
+  } catch {
+    // use defaults
+  }
+}
+
+async function saveSchedulerConfig() {
+  try {
+    await fs.writeFile(SCHEDULER_CONFIG_PATH, JSON.stringify(schedulerConfig, null, 2), "utf8");
+  } catch (e) {
+    console.warn("[scheduler] config save failed:", e.message || e);
+  }
+}
+
+function pythonBin() {
+  const candidates = [
+    path.resolve(__dirname, "..", ".venv", "bin", "python3"),
+    path.resolve(__dirname, "..", ".venv", "bin", "python"),
+  ];
+  for (const p of candidates) { if (existsSync(p)) return p; }
+  return "python3";
+}
+
+function spawnBot({ manual = false } = {}) {
+  if (botRunning) return false;
+  const py = pythonBin();
+  const mainPath = path.resolve(__dirname, "..", "main.py");
+  const args = [mainPath];
+  if (schedulerConfig.dryRun) args.push("--dry-run");
+  if (schedulerConfig.watchlistLimit) args.push("--watchlist-limit", String(schedulerConfig.watchlistLimit));
+
+  let proc;
+  try {
+    proc = spawn(py, args, {
+      cwd: path.resolve(__dirname, ".."),
+      env: { ...process.env },
+    });
+  } catch (e) {
+    pushLog("ERR", `Failed to spawn bot: ${e.message || e}`);
+    return false;
+  }
+
+  botProcess = proc;
+  botRunning = true;
+  lastRunAt = new Date().toISOString();
+  pushLog("START", `Bot started${manual ? " (manual)" : " (scheduled)"}${schedulerConfig.dryRun ? " [dry-run]" : ""}`);
+
+  proc.stdout.on("data", (chunk) => {
+    chunk.toString().split("\n").filter(l => l.trim()).forEach(line => pushLog("INFO", line));
+  });
+  proc.stderr.on("data", (chunk) => {
+    chunk.toString().split("\n").filter(l => l.trim()).forEach(line => pushLog("LOG", line));
+  });
+  proc.on("close", (code) => {
+    botRunning = false;
+    botProcess = null;
+    lastRunEndAt = new Date().toISOString();
+    pushLog("DONE", `Bot exited (code ${code ?? "—"})`);
+    computeNextRunAt();
+  });
+  proc.on("error", (e) => {
+    pushLog("ERR", `Process error: ${e.message}`);
+    botRunning = false;
+    botProcess = null;
+  });
+
+  computeNextRunAt();
+  return true;
+}
+
+function stopBot() {
+  if (!botProcess) return false;
+  try {
+    botProcess.kill("SIGTERM");
+    pushLog("STOP", "Bot process terminated by user");
+  } catch (e) {
+    pushLog("ERR", `Failed to stop bot: ${e.message}`);
+  }
+  return true;
+}
+
+function isInHoursWindow(now = new Date()) {
+  const { hoursStart, hoursEnd } = schedulerConfig;
+  if (hoursStart == null || hoursEnd == null) return true;
+  const h = now.getHours();
+  return h >= hoursStart && h <= hoursEnd;
+}
+
+function computeNextRunAt() {
+  if (!schedulerConfig.enabled || schedulerConfig.intervalMinutes <= 0) {
+    nextRunAt = null;
+    return;
+  }
+  const base = lastRunAt ? new Date(lastRunAt) : new Date();
+  nextRunAt = new Date(base.getTime() + schedulerConfig.intervalMinutes * 60 * 1000).toISOString();
+}
+
+// Tick every 30 seconds — check if it's time to fire a scheduled run
+setInterval(() => {
+  if (!schedulerConfig.enabled || botRunning) return;
+  if (!nextRunAt) { computeNextRunAt(); return; }
+  if (new Date() < new Date(nextRunAt)) return;
+  if (!isInHoursWindow()) {
+    pushLog("SKIP", `Outside trading hours (${schedulerConfig.hoursStart}:00–${schedulerConfig.hoursEnd}:00); advancing schedule`);
+    lastRunAt = new Date().toISOString();
+    computeNextRunAt();
+    return;
+  }
+  spawnBot({ manual: false });
+}, 30_000);
+
+// ── Scheduler API ─────────────────────────────────────────────────────────────
+
+app.get("/api/scheduler", (_req, res) => {
+  noStore(res);
+  res.json({
+    config: schedulerConfig,
+    running: botRunning,
+    lastRunAt,
+    lastRunEndAt,
+    nextRunAt,
+    recentLogs: logBuffer.slice(-100),
+  });
+});
+
+app.post("/api/scheduler/config", async (req, res) => {
+  const b = req.body || {};
+  schedulerConfig = {
+    enabled: Boolean(b.enabled),
+    intervalMinutes: Math.max(1, Number(b.intervalMinutes) || 60),
+    hoursStart: b.hoursStart != null ? Number(b.hoursStart) : 9,
+    hoursEnd: b.hoursEnd != null ? Number(b.hoursEnd) : 16,
+    dryRun: Boolean(b.dryRun),
+    watchlistLimit: Math.max(1, Number(b.watchlistLimit) || 50),
+  };
+  await saveSchedulerConfig();
+  if (schedulerConfig.enabled) computeNextRunAt();
+  else nextRunAt = null;
+  res.json({ ok: true, config: schedulerConfig, nextRunAt });
+});
+
+app.post("/api/scheduler/run-now", (_req, res) => {
+  if (botRunning) return res.json({ ok: false, reason: "already_running" });
+  const ok = spawnBot({ manual: true });
+  res.json({ ok });
+});
+
+app.post("/api/scheduler/stop", (_req, res) => {
+  const ok = stopBot();
+  res.json({ ok });
+});
+
+app.get("/api/scheduler/stream", (req, res) => {
+  noStore(res);
+  res.set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders();
+  for (const line of logBuffer) {
+    res.write(`data: ${JSON.stringify(line)}\n\n`);
+  }
+  sseClients.add(res);
+  req.on("close", () => sseClients.delete(res));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 app.get("/api/stats", async (_req, res) => {
   noStore(res);
@@ -420,10 +627,13 @@ app.get("/benchmark", (_req, res) => res.sendFile(path.join(publicDir, "benchmar
 app.get("/watchlist", (_req, res) => res.sendFile(path.join(publicDir, "watchlist.html")));
 app.get("/model", (_req, res) => res.sendFile(path.join(publicDir, "model.html")));
 app.get("/positions", (_req, res) => res.sendFile(path.join(publicDir, "positions.html")));
+app.get("/scheduler", (_req, res) => res.sendFile(path.join(publicDir, "scheduler.html")));
 
 app.use(express.static(publicDir));
 
 await seedStatsFileIfNeeded();
+await loadSchedulerConfig();
+computeNextRunAt();
 
 app.listen(PORT, dashboardListenHost(), () => {
   const { key, secret } = alpacaCredentials();
