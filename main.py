@@ -40,6 +40,7 @@ if _cwd_env.resolve() != _ENV_FILE.resolve():
 import os
 
 import yfinance as yf
+from alpaca.common.exceptions import APIError, RetryException
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, OrderType, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
@@ -209,6 +210,31 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
+def _alpaca_call(fn, *args, **kwargs):
+    """Call an Alpaca SDK method with exponential backoff on transient errors."""
+    delays = (1.0, 2.0, 4.0)
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate(delays, start=1):
+        try:
+            return fn(*args, **kwargs)
+        except APIError as e:
+            sc = e.status_code
+            if sc is not None and sc < 500:
+                raise  # 4xx = client error, don't retry
+            logger.warning("Alpaca API error (attempt %d/%d, status=%s): %s", attempt, len(delays) + 1, sc, e)
+            last_exc = e
+        except (RetryException, OSError) as e:
+            logger.warning("Alpaca transient error (attempt %d/%d): %s", attempt, len(delays) + 1, e)
+            last_exc = e
+        time.sleep(delay)
+    try:
+        return fn(*args, **kwargs)
+    except Exception:
+        if last_exc is not None:
+            logger.error("Alpaca call failed after %d attempts", len(delays) + 1)
+        raise
+
+
 def _env_nonempty(*names: str) -> str | None:
     """First defined, non-empty env value among ``names`` (after strip / simple quote trim)."""
     for n in names:
@@ -254,7 +280,7 @@ def _try_trading_client(*, dry_run: bool) -> TradingClient | None:
 
 def _position_map(client: TradingClient) -> dict[str, float]:
     out: dict[str, float] = {}
-    for p in client.get_all_positions():
+    for p in _alpaca_call(client.get_all_positions):
         sym = str(p.symbol).upper()
         out[sym] = float(p.qty)
     return out
@@ -287,7 +313,7 @@ def _has_open_protective_sell(client: TradingClient, symbol: str) -> bool:
         side=OrderSide.SELL,
     )
     try:
-        orders = client.get_orders(filter=req)
+        orders = _alpaca_call(client.get_orders, filter=req)
     except Exception as e:
         logger.warning("Could not list open orders for %s: %s", symbol, e)
         return False
@@ -300,7 +326,7 @@ def _has_open_protective_sell(client: TradingClient, symbol: str) -> bool:
 def _reference_price_for_long_stop(client: TradingClient, symbol: str) -> float | None:
     """Use Alpaca position mark; avoids an extra market-data client."""
     try:
-        pos = client.get_open_position(symbol)
+        pos = _alpaca_call(client.get_open_position, symbol)
     except Exception as e:
         logger.warning("get_open_position %s: %s", symbol, e)
         return None
@@ -354,7 +380,7 @@ def ensure_trailing_stop_for_long(
                 TRAIL_PCT,
             )
             return
-        client.submit_order(order_data=trail_req)
+        _alpaca_call(client.submit_order, order_data=trail_req)
         logger.info(
             "Submitted trailing stop sell %s qty=%s trail_percent=%s%% tif=gtc",
             symbol,
@@ -401,7 +427,7 @@ def ensure_trailing_stop_for_long(
             ref,
         )
         return
-    client.submit_order(order_data=stop_req)
+    _alpaca_call(client.submit_order, order_data=stop_req)
     logger.info(
         "Submitted stop sell %s qty=%s stop_price=%.2f (~%.1f%% below ref %.2f) tif=day "
         "(fractional long; trailing_stop not supported)",
@@ -493,7 +519,7 @@ def reconcile_pending_orders(client: TradingClient) -> set[str]:
         if not oid:
             continue
         try:
-            od = client.get_order_by_id(oid)
+            od = _alpaca_call(client.get_order_by_id, oid)
             st = _order_status_value(getattr(od, "status", None))
             fq = _filled_qty_from_order(od)
             if fq > 0 or st == "filled":
@@ -550,7 +576,7 @@ def try_force_buy_entry(
             sym,
         )
         return
-    account = client.get_account()
+    account = _alpaca_call(client.get_account)
     equity_now = float(account.equity)
     target_notional = equity_now * POSITION_PCT_EQUITY
     buying_power = float(account.buying_power)
@@ -607,7 +633,7 @@ def submit_strong_buy_entry(
         logger.info("[dry-run] Market BUY %s notional=%.2f DAY", symbol, notional_usd)
         return True, 0.0
 
-    placed = client.submit_order(order_data=mkt)
+    placed = _alpaca_call(client.submit_order, order_data=mkt)
     oid = str(getattr(placed, "id", placed))
     logger.info("Submitted market BUY %s notional=%.2f DAY order_id=%s", symbol, notional_usd, oid)
     _append_pending_order(symbol, oid, notional_usd)
@@ -615,7 +641,7 @@ def submit_strong_buy_entry(
     for _ in range(FILL_POLL_ATTEMPTS):
         time.sleep(FILL_POLL_SEC)
         try:
-            od = client.get_order_by_id(oid)
+            od = _alpaca_call(client.get_order_by_id, oid)
         except Exception as e:
             logger.warning("get_order_by_id %s: %s", oid, e)
             continue
@@ -989,7 +1015,7 @@ def run(
 
     pending_skip = reconcile_pending_orders(client)
 
-    account = client.get_account()
+    account = _alpaca_call(client.get_account)
     logger.info(
         "Account equity=%.2f portfolio_value=%.2f paper=%s max_concurrent_positions=%d",
         float(account.equity),
@@ -1069,7 +1095,7 @@ def run(
                     )
                     continue
 
-                account = client.get_account()
+                account = _alpaca_call(client.get_account)
                 equity_now = float(account.equity)
                 target_notional = equity_now * POSITION_PCT_EQUITY
                 buying_power = float(account.buying_power)
@@ -1126,7 +1152,7 @@ def run(
                     time.sleep(YF_THROTTLE_AFTER_TICKER)
         logger.info("--- watchlist ML pass done ---")
 
-    account = client.get_account()
+    account = _alpaca_call(client.get_account)
     total_portfolio_value = float(
         getattr(account, "portfolio_value", None) or account.equity
     )
