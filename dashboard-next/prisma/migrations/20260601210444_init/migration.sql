@@ -1,0 +1,28 @@
+-- CreateTable
+CREATE TABLE "PortfolioStat" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "timestampUtc" DATETIME NOT NULL,
+    "portfolioValue" REAL NOT NULL,
+    "spyEquivalent" REAL NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
+CREATE TABLE "SchedulerConfig" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT DEFAULT 1,
+    "enabled" BOOLEAN NOT NULL DEFAULT false,
+    "intervalMinutes" INTEGER NOT NULL DEFAULT 60,
+    "hoursStart" INTEGER NOT NULL DEFAULT 9,
+    "hoursEnd" INTEGER NOT NULL DEFAULT 16,
+    "dryRun" BOOLEAN NOT NULL DEFAULT false,
+    "watchlistLimit" INTEGER NOT NULL DEFAULT 50,
+    "updatedAt" DATETIME NOT NULL
+);
+
+-- CreateTable
+CREATE TABLE "BotLogEntry" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "tag" TEXT NOT NULL,
+    "message" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
