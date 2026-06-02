@@ -1,31 +1,45 @@
-# fly.toml app configuration file generated for algo-trading-bot on 2026-06-01T20:33:41Z
+# Next.js dashboard — separate Fly app from the rating API (fly.rating.toml).
 #
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+# First-time setup (run once):
+#   fly apps create algo-trading-bot
+#   fly volumes create data --region iad --size 1 -a algo-trading-bot
+#   fly secrets set DATABASE_URL="file:/data/trading.db" -a algo-trading-bot
+#   fly secrets set RATING_ENGINE_URL=http://algo-trading-rating.internal:5000 -a algo-trading-bot
+#   fly secrets set APCA_API_KEY_ID=... APCA_API_SECRET_KEY=... ALPACA_PAPER=true -a algo-trading-bot
 #
+# Deploy:
+#   fly deploy
+#
+# If rating engine is unreachable over .internal, use the public edge instead:
+#   fly secrets set RATING_ENGINE_URL=https://algo-trading-rating.fly.dev -a algo-trading-bot
 
-app = 'algo-trading-bot'
-primary_region = 'ams'
+app = "algo-trading-bot"
+primary_region = "iad"
 
 [build]
-  dockerfile = 'Dockerfile.fly.dashboard'
+  dockerfile = "Dockerfile.fly.dashboard"
 
 [http_service]
-  internal_port = 8080
+  internal_port = 3000
   force_https = true
-  auto_stop_machines = 'off'
+  auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
-  processes = ['app']
+  processes = ["app"]
 
-  [[http_service.checks]]
-    interval = '30s'
-    timeout = '5s'
-    grace_period = '45s'
-    method = 'get'
-    path = '/'
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "10s"
+  grace_period = "60s"
+  method = "get"
+  path = "/"
 
 [[vm]]
-  memory = '512mb'
-  cpu_kind = 'shared'
+  memory = "1gb"
+  cpu_kind = "shared"
   cpus = 1
-  memory_mb = 256
+
+# Persistent volume — stores the SQLite database across redeploys
+[[mounts]]
+  source = "data"
+  destination = "/data"

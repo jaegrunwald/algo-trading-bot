@@ -1,19 +1,48 @@
-.env
-.env.example
+# ── Python ───────────────────────────────────────────────────────────────────
 .venv/
 venv/
 __pycache__/
 *.py[cod]
-.Python
 *.egg-info/
 .eggs/
+.Python
 dist/
 build/
 .pytest_cache/
 .mypy_cache/
-.DS_Store
-models/*.joblib
-dashboard/node_modules/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Next.js (dashboard-next/) ─────────────────────────────────────────────────
+dashboard-next/.next/
+dashboard-next/out/
+dashboard-next/node_modules/
+dashboard-next/app/generated/
+dashboard-next/tsconfig.tsbuildinfo
+dashboard-next/next-env.d.ts
+
+# ── Prisma / SQLite ───────────────────────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+
+# ── Legacy dashboard ──────────────────────────────────────────────────────────
+dashboard-legacy/node_modules/
+
+# ── Trading bot runtime state ─────────────────────────────────────────────────
 .spy_last_good_close.json
 .pending_orders.json
 .pending_orders.json.tmp
+.portfolio_spy_baseline.json
+.scheduler-config.json
+
+# ── ML models (large binary artifacts — managed separately) ──────────────────
+models/*.joblib
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+*.pem
+Thumbs.db

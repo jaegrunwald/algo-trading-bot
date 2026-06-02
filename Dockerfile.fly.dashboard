@@ -1,12 +1,38 @@
-# Fly build context = repo root (where fly.toml lives). Copies dashboard assets explicitly.
+# Next.js dashboard — build context is repo root (where fly.toml lives).
+#
+# Secrets required on the Fly app before deploying:
+#   fly secrets set DATABASE_URL="file:/data/trading.db" -a algo-trading-bot
+#   fly secrets set RATING_ENGINE_URL=http://algo-trading-rating.internal:5000 -a algo-trading-bot
+#   fly secrets set APCA_API_KEY_ID=... APCA_API_SECRET_KEY=... ALPACA_PAPER=true -a algo-trading-bot
+#
+# Volume (run once — must match primary_region in fly.toml):
+#   fly volumes create data --region iad --size 1 -a algo-trading-bot
+
 FROM node:20-alpine
 WORKDIR /app
-COPY dashboard/package.json dashboard/package-lock.json ./
-RUN npm ci --omit=dev
-COPY dashboard/server.js ./
-COPY dashboard/public ./public
-# Default STATS_PATH is path.join(__dirname, "..", "portfolio_stats.csv") → /portfolio_stats.csv in this image.
-COPY portfolio_stats.csv /portfolio_stats.csv
+
+# Build tools required by better-sqlite3 native addon
+RUN apk add --no-cache python3 make g++
+
+# Install dependencies
+COPY dashboard-next/package.json dashboard-next/package-lock.json ./
+RUN npm ci
+
+# Copy source
+COPY dashboard-next/ .
+
+# Generate Prisma client
+RUN npx prisma generate
+
+# Build Next.js
 ENV NODE_ENV=production
+RUN npm run build
+
+# Runtime env
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+
 EXPOSE 3000
-CMD ["node", "server.js"]
+
+# Apply any pending DB migrations then start the server
+CMD ["sh", "-c", "npx prisma migrate deploy && npm start"]
